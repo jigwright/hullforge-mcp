@@ -29,6 +29,16 @@ class SessionInfo:
     pid: int = 0
     project_dir: str = ""
 
+    # Set in the EDITOR, at Project Settings > Plugins > HullForge, and carried
+    # here for the same reason the port is: one source of truth. A client-side
+    # setting that could disagree with the editor produces a class of failure
+    # with nothing on screen to say which half is wrong.
+    #
+    # Absent from a session file written by an older editor, which reads as off
+    # and empty. That is exactly what that editor meant, so the two agree.
+    catalog_mode: bool = False
+    catalog_areas: tuple[str, ...] = ()
+
 
 def session_file_path(project_dir: str | os.PathLike[str]) -> Path:
     return Path(project_dir) / "Saved" / "HullForge" / "session.json"
@@ -105,6 +115,10 @@ def read_session(path: str | os.PathLike[str]) -> SessionInfo:
         project_name=str(data.get("project_name", "")),
         pid=int(data.get("pid", 0)),
         project_dir=str(data.get("project_dir", "")),
+        catalog_mode=bool(data.get("catalog_mode", False)),
+        catalog_areas=tuple(
+            str(a) for a in (data.get("catalog_areas") or []) if str(a).strip()
+        ),
     )
 
 

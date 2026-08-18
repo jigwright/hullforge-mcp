@@ -153,23 +153,48 @@ _DISABLE_AREAS_TOOL = types.Tool(
 )
 
 
-def _catalog_mode_enabled() -> bool:
-    """Whether catalog mode is on, from the environment.
+_TRUEISH = {"1", "true", "yes", "on"}
+_FALSEISH = {"0", "false", "no", "off"}
+
+
+def _catalog_mode_override() -> bool | None:
+    """Catalog mode from the environment, or None when it says nothing.
+
+    Tri-state on purpose. Once the EDITOR can also ask for catalog mode, "the
+    variable is unset" and "the variable says off" stop being the same thing:
+    the first should defer to the project, the second should override it. A
+    plain bool here would make it impossible to turn the mode off from the
+    client side on a project that has it on.
+
+    Anything that is neither trueish nor falseish is treated as unset rather
+    than guessed at, so a typo defers to the project instead of silently
+    meaning off.
 
     Read on every call rather than cached at import, so a test can flip it and
     so a user who sets it and restarts the client gets what they asked for
     without a stale module-level value in the way.
     """
     raw = os.environ.get(_CATALOG_MODE_ENV, "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    if raw in _TRUEISH:
+        return True
+    if raw in _FALSEISH:
+        return False
+    return None
 
 
-def _preloaded_areas() -> set[str]:
+def _preloaded_areas() -> set[str] | None:
     """Areas to switch on at startup, from the environment.
 
     For the user who already knows they are working on materials today and does
     not want to spend a round trip saying so.
+
+    None when the variable is unset, so the project's own list is used instead.
+    An explicitly EMPTY variable returns an empty set, which means "start with
+    nothing but Core" and overrides a project list rather than falling back to
+    it. The two need to be distinguishable for the same reason the mode does.
     """
+    if _CATALOG_AREAS_ENV not in os.environ:
+        return None
     raw = os.environ.get(_CATALOG_AREAS_ENV, "")
     return {part.strip() for part in raw.split(",") if part.strip()}
 
@@ -264,7 +289,12 @@ class HullForgeServer:
         # Uncategorised by the editor, which is loud there and visible here.
         self._areas: dict[str, str] = {}
         self._area_counts: dict[str, int] = {}
-        self._enabled_areas: set[str] = {_ALWAYS_ON_AREA} | _preloaded_areas()
+        # Seeded once, on the first connection, because the project's own
+        # preference lives in the session file and there is no session yet.
+        self._enabled_areas: set[str] = {_ALWAYS_ON_AREA}
+        self._areas_seeded: bool = False
+        self._session_catalog_mode: bool = False
+        self._session_catalog_areas: tuple[str, ...] = ()
         self._mutating: set[str] = set()
         self._session_key: tuple[int, str] | None = None
         self._mcp_session: Any = None
@@ -284,7 +314,7 @@ class HullForgeServer:
                     "hf_list_tool_areas to see every area HullForge covers, then "
                     "hf_enable_tool_areas to bring the ones this task needs into "
                     "the list. The list updates immediately."
-                    if _catalog_mode_enabled()
+                    if self._catalog_mode()
                     else " hf_list_tool_areas gives an overview of everything "
                     "available, grouped by area."
                 )
@@ -314,9 +344,48 @@ class HullForgeServer:
         await client.connect()                      # raises BridgeError
         self._client = client
         self._session_key = (info.port, info.token)
+        self._adopt_session_catalog(info)
         log.info("connected to %s on port %d (v%s)",
                  info.project_name or "editor", info.port, client.server_version)
         return client
+
+    def _adopt_session_catalog(self, info: SessionInfo) -> None:
+        """Take the project's catalog preference from the editor we connected to.
+
+        The editor is the source of truth for the same reason it is for the
+        port: two settings that can disagree produce a failure with nothing on
+        screen to say which one is wrong.
+
+        The enabled set is seeded ONCE. Re-seeding on every reconnect would
+        undo areas the caller switched on by hand the moment the editor blipped,
+        which is indistinguishable from the tool list randomly shrinking.
+        """
+        self._session_catalog_mode = info.catalog_mode
+        self._session_catalog_areas = info.catalog_areas
+
+        if self._areas_seeded:
+            return
+        self._areas_seeded = True
+
+        from_env = _preloaded_areas()
+        seed = from_env if from_env is not None else set(info.catalog_areas)
+        self._enabled_areas = {_ALWAYS_ON_AREA} | seed
+
+    def _catalog_mode(self) -> bool:
+        """Catalog mode as it applies right now.
+
+        The environment wins when it says anything, because setting a variable
+        on the connector is a deliberate per-launch choice by one person, and
+        the project setting is a per-project one that gets committed and shared.
+        Someone who wants every tool today should be able to get them without
+        editing the project.
+
+        Falls back to the project when the variable says nothing, and to off
+        when there is no session yet, which is the state where only the
+        connector's own tools are listed anyway.
+        """
+        override = _catalog_mode_override()
+        return override if override is not None else self._session_catalog_mode
 
     def _pick_session(self) -> SessionInfo:
         """The editor to talk to.
@@ -411,7 +480,7 @@ class HullForgeServer:
         log.info(
             "catalog: %d tools (%d mutating) across %d areas%s",
             len(tools), len(mutating), len(self._area_counts),
-            " [catalog mode]" if _catalog_mode_enabled() else "",
+            " [catalog mode]" if self._catalog_mode() else "",
         )
         return tools
 
@@ -425,7 +494,7 @@ class HullForgeServer:
         about what dispatches, and a mode that quietly hides two thirds of it
         has to be asked for.
         """
-        if not _catalog_mode_enabled():
+        if not self._catalog_mode():
             return tools
 
         return [
@@ -441,7 +510,7 @@ class HullForgeServer:
         switches are offered only when they would do something: listing a tool
         that is a no-op is worse than not listing it.
         """
-        if not _catalog_mode_enabled():
+        if not self._catalog_mode():
             return [_BRIDGE_STATUS_TOOL, _LIST_AREAS_TOOL]
         return [
             _BRIDGE_STATUS_TOOL,
@@ -454,7 +523,7 @@ class HullForgeServer:
         return sorted(self._area_counts)
 
     def _list_areas_result(self) -> types.CallToolResult:
-        enabled = _catalog_mode_enabled()
+        enabled = self._catalog_mode()
         total = sum(self._area_counts.values())
         listed = sum(
             count for area, count in self._area_counts.items()
@@ -494,7 +563,7 @@ class HullForgeServer:
                 f"Catalog mode is off, so every tool is listed. Set "
                 f"{_CATALOG_MODE_ENV}=1 in the connector's environment to turn it "
                 f"on, and optionally {_CATALOG_AREAS_ENV}=Materials,Blueprints to "
-                f"start with particular areas already listed. Core is always on."
+                f"start with particular areas already listed. Or turn it on per PROJECT at Project Settings > Plugins > HullForge > Catalog mode, which needs no client restart. The environment variable wins when it is set. Core is always on."
             )
             lines = [
                 f"Catalog mode is off: all {total} tools are listed, across "
@@ -650,7 +719,7 @@ class HullForgeServer:
             return self._list_areas_result()
 
         if name in (_ENABLE_AREAS_TOOL.name, _DISABLE_AREAS_TOOL.name):
-            if not _catalog_mode_enabled():
+            if not self._catalog_mode():
                 return _error(
                     f"Catalog mode is off, so every tool is already listed and "
                     f"'{name}' would do nothing. Set {_CATALOG_MODE_ENV}=1 in the "
@@ -670,7 +739,7 @@ class HullForgeServer:
         # hidden tool that works anyway means the list is advice, and everything
         # else in this product depends on it not being advice. The remedy is one
         # call and it is named.
-        if _catalog_mode_enabled() and self._areas:
+        if self._catalog_mode() and self._areas:
             area = self._areas.get(name)
             if area is not None and area not in self._enabled_areas:
                 return _error(
