@@ -59,6 +59,34 @@ list forever, since the client has no reason to ask again.
 One tool, `hf_bridge_status`, is implemented here rather than in the editor. It
 is therefore always available, so "no tools" is never a silent state.
 
+## Catalog mode
+
+The editor advertises well over a hundred tools. Listing all of them costs the
+model tens of thousands of tokens of context before it has done anything, and
+most of a session touches two or three areas.
+
+Set `HULLFORGE_CATALOG_MODE=1` and the tool list holds a small always-on core
+plus whatever areas have been switched on:
+
+```
+HULLFORGE_CATALOG_MODE=1                    turn it on
+HULLFORGE_CATALOG_AREAS=Materials,Sequencer start with those already listed
+```
+
+`hf_list_tool_areas` shows every area with its tool count and whether it is
+listed. `hf_enable_tool_areas` and `hf_disable_tool_areas` change the set, and
+the tool list updates immediately through the same `tools/list_changed`
+mechanism that makes tools appear when an editor opens. The `Core` area is
+always on and cannot be disabled.
+
+**It is off by default and that is deliberate.** The whole argument for this
+connector is that the tool list is the truth about what the editor will
+dispatch, and a mode that silently hides two thirds of it should be asked for
+rather than assumed. `hf_list_tool_areas` is listed either way, so the mode is
+discoverable without being imposed. A tool from an area that is not listed is
+refused rather than quietly run, for the same reason: a hidden tool that works
+anyway would make the list advice.
+
 ## Reliability
 
 Two things in here exist because the alternative loses work.

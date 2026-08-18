@@ -39,6 +39,119 @@ _INTERNAL_TOOLS = {"hf_describe_tools"}
 # How often to look for an editor appearing or going away.
 _WATCH_INTERVAL_SECONDS = 1.0
 
+# --- catalog mode ------------------------------------------------------------
+#
+# Progressive tool disclosure. With well over a hundred tools, listing all of
+# them costs the model tens of thousands of tokens of context before it has done
+# anything, and most of a session touches two or three areas. Catalog mode lists
+# a small always-on core plus whatever areas have been switched on, and pushes
+# tools/list_changed when the set changes - the same mechanism that already makes
+# tools appear when an editor opens, so no client needs to do anything new.
+#
+# OFF BY DEFAULT, and it stays that way. Everything else in this product is
+# "what you see is what dispatches", and a mode that silently hides two thirds
+# of the tools would break that for someone who never asked for it. It is opt-in
+# by environment variable, and hf_list_tool_areas says it exists and what it
+# would save whether or not it is on.
+_CATALOG_MODE_ENV = "HULLFORGE_CATALOG_MODE"
+_CATALOG_AREAS_ENV = "HULLFORGE_CATALOG_AREAS"
+
+# The area that cannot be switched off. It holds the tools that answer "what is
+# this project and what can you do", which is where every session starts and
+# which the model needs before it can sensibly ask for anything else.
+_ALWAYS_ON_AREA = "Core"
+
+_LIST_AREAS_TOOL = types.Tool(
+    name="hf_list_tool_areas",
+    title="List Tool Areas",
+    description=(
+        "Every area of the editor HullForge covers, with how many tools each "
+        "one holds and whether it is currently listed. Start here when you do "
+        "not know which tool you need. If catalog mode is on, use "
+        "hf_enable_tool_areas to bring an area's tools into the tool list."
+    ),
+    input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+    annotations=types.ToolAnnotations(
+        read_only_hint=True, destructive_hint=False, idempotent_hint=True
+    ),
+)
+
+_ENABLE_AREAS_TOOL = types.Tool(
+    name="hf_enable_tool_areas",
+    title="Enable Tool Areas",
+    description=(
+        "Add one or more areas' tools to the tool list. The list updates "
+        "immediately; no restart is needed. Enable what the task needs rather "
+        "than everything, because the whole point of catalog mode is that the "
+        "tools you are not using are not in your context."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "areas": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "description": (
+                    "Area names exactly as hf_list_tool_areas reports them."
+                ),
+            }
+        },
+        "required": ["areas"],
+        "additionalProperties": False,
+    },
+    annotations=types.ToolAnnotations(
+        # It changes which tools are listed and nothing in the project.
+        read_only_hint=True, destructive_hint=False, idempotent_hint=True
+    ),
+)
+
+_DISABLE_AREAS_TOOL = types.Tool(
+    name="hf_disable_tool_areas",
+    title="Disable Tool Areas",
+    description=(
+        "Remove one or more areas' tools from the tool list, freeing the "
+        "context they occupy. The Core area cannot be disabled."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "areas": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "description": "Area names exactly as hf_list_tool_areas reports them.",
+            }
+        },
+        "required": ["areas"],
+        "additionalProperties": False,
+    },
+    annotations=types.ToolAnnotations(
+        read_only_hint=True, destructive_hint=False, idempotent_hint=True
+    ),
+)
+
+
+def _catalog_mode_enabled() -> bool:
+    """Whether catalog mode is on, from the environment.
+
+    Read on every call rather than cached at import, so a test can flip it and
+    so a user who sets it and restarts the client gets what they asked for
+    without a stale module-level value in the way.
+    """
+    raw = os.environ.get(_CATALOG_MODE_ENV, "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _preloaded_areas() -> set[str]:
+    """Areas to switch on at startup, from the environment.
+
+    For the user who already knows they are working on materials today and does
+    not want to spend a round trip saying so.
+    """
+    raw = os.environ.get(_CATALOG_AREAS_ENV, "")
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
 # Always present, even with no editor running. Without this, "no editor" shows
 # up as an empty tool list, which is silent and baffling - the user has no way
 # to tell a broken install from an editor they forgot to open.
@@ -116,6 +229,12 @@ class HullForgeServer:
         self._project_dir = project_dir
         self._client: BridgeClient | None = None
         self._catalog: list[types.Tool] = []
+        # Area name per tool, from the editor. Catalog mode gates on this and
+        # nothing here guesses it: a tool with no area is filed under
+        # Uncategorised by the editor, which is loud there and visible here.
+        self._areas: dict[str, str] = {}
+        self._area_counts: dict[str, int] = {}
+        self._enabled_areas: set[str] = {_ALWAYS_ON_AREA} | _preloaded_areas()
         self._mutating: set[str] = set()
         self._session_key: tuple[int, str] | None = None
         self._mcp_session: Any = None
@@ -130,6 +249,15 @@ class HullForgeServer:
                 "that the outcome is UNKNOWN, the operation may still have taken "
                 "effect - verify current state before retrying, or you risk "
                 "applying it twice."
+                + (
+                    " CATALOG MODE IS ON: only some areas' tools are listed. Call "
+                    "hf_list_tool_areas to see every area HullForge covers, then "
+                    "hf_enable_tool_areas to bring the ones this task needs into "
+                    "the list. The list updates immediately."
+                    if _catalog_mode_enabled()
+                    else " hf_list_tool_areas gives an overview of everything "
+                    "available, grouped by area."
+                )
             ),
         )
         # Use the concrete params models directly. Reading them off
@@ -187,6 +315,7 @@ class HullForgeServer:
 
         tools: list[types.Tool] = []
         mutating: set[str] = set()
+        areas: dict[str, str] = {}
         for entry in described.get("tools", []):
             name = entry.get("name", "")
             if not name or name in _INTERNAL_TOOLS:
@@ -202,6 +331,8 @@ class HullForgeServer:
             mutating_flag = bool(entry.get("mutating"))
             if mutating_flag:
                 mutating.add(name)
+
+            areas[name] = str(entry.get("area") or "Uncategorised")
 
             # destructive_hint means "can destroy work", not "writes".
             # Flagging every mutation destructive would make the flag
@@ -224,8 +355,221 @@ class HullForgeServer:
 
         self._catalog = tools
         self._mutating = mutating
-        log.info("catalog: %d tools (%d mutating)", len(tools), len(mutating))
+        self._areas = areas
+
+        # Counts come from what will actually be LISTED, not from the editor's
+        # own totals. The editor counts every registered tool including the
+        # internal ones the sidecar strips, so quoting its number would report
+        # an area as holding one more tool than the model can see. Small, and
+        # exactly the sort of quiet inaccuracy this product does not ship.
+        counts: dict[str, int] = {}
+        for area in areas.values():
+            counts[area] = counts.get(area, 0) + 1
+
+        # The editor's area list is still worth having: it is the authoritative
+        # set of NAMES, so an area whose tools are all internal still appears
+        # rather than silently not existing.
+        reported = described.get("areas")
+        if isinstance(reported, list):
+            for entry in reported:
+                if isinstance(entry, dict) and entry.get("name"):
+                    counts.setdefault(str(entry["name"]), 0)
+
+        self._area_counts = counts
+
+        log.info(
+            "catalog: %d tools (%d mutating) across %d areas%s",
+            len(tools), len(mutating), len(self._area_counts),
+            " [catalog mode]" if _catalog_mode_enabled() else "",
+        )
         return tools
+
+    # -- catalog mode ------------------------------------------------------
+
+    def _visible_tools(self, tools: list[types.Tool]) -> list[types.Tool]:
+        """The tools to list, after catalog mode has had its say.
+
+        With catalog mode off this is every tool, which is the point: the
+        default behaviour of this product is that the tool list IS the truth
+        about what dispatches, and a mode that quietly hides two thirds of it
+        has to be asked for.
+        """
+        if not _catalog_mode_enabled():
+            return tools
+
+        return [
+            tool for tool in tools
+            if self._areas.get(tool.name, "Uncategorised") in self._enabled_areas
+        ]
+
+    def _meta_tools(self) -> list[types.Tool]:
+        """The always-present tools that are not the editor's.
+
+        hf_list_tool_areas is offered whether or not catalog mode is on, because
+        "what can this thing do" is a real question with a short answer. The two
+        switches are offered only when they would do something: listing a tool
+        that is a no-op is worse than not listing it.
+        """
+        if not _catalog_mode_enabled():
+            return [_BRIDGE_STATUS_TOOL, _LIST_AREAS_TOOL]
+        return [
+            _BRIDGE_STATUS_TOOL,
+            _LIST_AREAS_TOOL,
+            _ENABLE_AREAS_TOOL,
+            _DISABLE_AREAS_TOOL,
+        ]
+
+    def _known_areas(self) -> list[str]:
+        return sorted(self._area_counts)
+
+    def _list_areas_result(self) -> types.CallToolResult:
+        enabled = _catalog_mode_enabled()
+        total = sum(self._area_counts.values())
+        listed = sum(
+            count for area, count in self._area_counts.items()
+            if not enabled or area in self._enabled_areas
+        )
+
+        areas = [
+            {
+                "name": area,
+                "tool_count": count,
+                "listed": (not enabled) or area in self._enabled_areas,
+                "always_on": area == _ALWAYS_ON_AREA,
+            }
+            for area, count in sorted(self._area_counts.items())
+        ]
+
+        payload: dict[str, Any] = {
+            "catalog_mode": enabled,
+            "areas": areas,
+            "area_count": len(areas),
+            "tools_total": total,
+            "tools_listed": listed,
+        }
+
+        if enabled:
+            payload["how_to_use"] = (
+                "Call hf_enable_tool_areas with the areas this task needs. The "
+                "tool list updates immediately. Disable areas you have finished "
+                "with to free the context back up."
+            )
+            lines = [
+                f"Catalog mode is ON. {listed} of {total} tools are listed, "
+                f"across {len(areas)} areas."
+            ]
+        else:
+            payload["how_to_enable"] = (
+                f"Catalog mode is off, so every tool is listed. Set "
+                f"{_CATALOG_MODE_ENV}=1 in the connector's environment to turn it "
+                f"on, and optionally {_CATALOG_AREAS_ENV}=Materials,Blueprints to "
+                f"start with particular areas already listed. Core is always on."
+            )
+            lines = [
+                f"Catalog mode is off: all {total} tools are listed, across "
+                f"{len(areas)} areas."
+            ]
+
+        for area in areas:
+            mark = "on " if area["listed"] else "off"
+            suffix = " (always on)" if area["always_on"] else ""
+            lines.append(f"  [{mark}] {area['name']:<18} {area['tool_count']:>3}{suffix}")
+
+        if not enabled:
+            lines.append("")
+            lines.append(payload["how_to_enable"])
+
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text="\n".join(lines))],
+            structured_content=payload,
+        )
+
+    async def _set_areas_result(
+        self, args: dict[str, Any], *, enable: bool
+    ) -> types.CallToolResult:
+        raw = args.get("areas")
+        if not isinstance(raw, list) or not raw:
+            return _error(
+                "'areas' is required and must be a non-empty array of area "
+                "names. hf_list_tool_areas reports them."
+            )
+
+        wanted = [str(a).strip() for a in raw if str(a).strip()]
+        known = set(self._known_areas())
+
+        # Case-insensitive match, because an area name typed from memory with
+        # the wrong case is a typo the tool can fix rather than an error the
+        # caller has to.
+        lowered = {a.lower(): a for a in known}
+        resolved: list[str] = []
+        unknown: list[str] = []
+        for name in wanted:
+            match = lowered.get(name.lower())
+            if match:
+                resolved.append(match)
+            else:
+                unknown.append(name)
+
+        if unknown:
+            return _error(
+                f"No such area: {', '.join(unknown)}. "
+                f"Known areas: {', '.join(sorted(known)) or 'none, no editor is connected'}. "
+                f"Nothing was changed."
+            )
+
+        refused: list[str] = []
+        if not enable:
+            refused = [a for a in resolved if a == _ALWAYS_ON_AREA]
+            resolved = [a for a in resolved if a != _ALWAYS_ON_AREA]
+
+        before = set(self._enabled_areas)
+        if enable:
+            self._enabled_areas |= set(resolved)
+        else:
+            self._enabled_areas -= set(resolved)
+        self._enabled_areas.add(_ALWAYS_ON_AREA)
+
+        changed = self._enabled_areas != before
+        if changed:
+            await self._notify_tools_changed()
+
+        listed = sum(
+            count for area, count in self._area_counts.items()
+            if area in self._enabled_areas
+        )
+
+        verb = "Enabled" if enable else "Disabled"
+        lines = [
+            f"{verb} {', '.join(resolved) if resolved else 'nothing'}. "
+            f"{listed} of {sum(self._area_counts.values())} tools are now listed."
+        ]
+        if refused:
+            lines.append(
+                f"{_ALWAYS_ON_AREA} cannot be disabled: it holds the tools that "
+                f"answer what this project is and what else is available."
+            )
+        if not changed:
+            lines.append("Nothing changed; those areas were already in that state.")
+
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text=" ".join(lines))],
+            structured_content={
+                "enabled_areas": sorted(self._enabled_areas),
+                "tools_listed": listed,
+                "tools_total": sum(self._area_counts.values()),
+                "changed": changed,
+                "refused": refused,
+            },
+        )
+
+    async def _notify_tools_changed(self) -> None:
+        session = self._mcp_session
+        if session is None:
+            return
+        try:
+            await session.send_tool_list_changed()
+        except Exception as exc:  # noqa: BLE001 - never fail a call over a notification
+            log.debug("could not send tools/list_changed: %s", exc)
 
     # -- handlers ----------------------------------------------------------
 
@@ -246,7 +590,9 @@ class HullForgeServer:
 
         # Deliberately no ttl_ms: the catalog changes whenever HullForge.Reload
         # runs, and a cached stale catalog is worse than re-fetching.
-        return types.ListToolsResult(tools=[_BRIDGE_STATUS_TOOL, *tools])
+        return types.ListToolsResult(
+            tools=[*self._meta_tools(), *self._visible_tools(tools)]
+        )
 
     def _remember_session(self, ctx: Any) -> None:
         session = getattr(ctx, "session", None)
@@ -261,6 +607,47 @@ class HullForgeServer:
 
         if name == _BRIDGE_STATUS_TOOL.name:
             return self._bridge_status()
+
+        if name == _LIST_AREAS_TOOL.name:
+            # Refresh first: asking what areas exist when the catalog has never
+            # been fetched should answer the question, not report zero areas.
+            if not self._area_counts:
+                try:
+                    await self._refresh_catalog()
+                except (SessionError, BridgeError) as exc:
+                    return _error(str(exc))
+            return self._list_areas_result()
+
+        if name in (_ENABLE_AREAS_TOOL.name, _DISABLE_AREAS_TOOL.name):
+            if not _catalog_mode_enabled():
+                return _error(
+                    f"Catalog mode is off, so every tool is already listed and "
+                    f"'{name}' would do nothing. Set {_CATALOG_MODE_ENV}=1 in the "
+                    f"connector's environment to turn it on."
+                )
+            if not self._area_counts:
+                try:
+                    await self._refresh_catalog()
+                except (SessionError, BridgeError) as exc:
+                    return _error(str(exc))
+            return await self._set_areas_result(
+                args, enable=(name == _ENABLE_AREAS_TOOL.name)
+            )
+
+        # A tool from an area that is not listed. Refused rather than run,
+        # because the tool list has to be the truth about what is callable: a
+        # hidden tool that works anyway means the list is advice, and everything
+        # else in this product depends on it not being advice. The remedy is one
+        # call and it is named.
+        if _catalog_mode_enabled() and self._areas:
+            area = self._areas.get(name)
+            if area is not None and area not in self._enabled_areas:
+                return _error(
+                    f"'{name}' is in the '{area}' area, which is not currently "
+                    f"listed. Call hf_enable_tool_areas with "
+                    f"{{\"areas\": [\"{area}\"]}} and then call it again. "
+                    f"Nothing was changed."
+                )
 
         is_mutating = name in self._mutating
 
@@ -445,12 +832,9 @@ class HullForgeServer:
             if self._mcp_session is None:
                 continue
 
-            try:
-                await self._mcp_session.send_tool_list_changed()
-                log.info("editor set changed (%d now); told the client to refresh",
-                         len(current))
-            except Exception as exc:  # noqa: BLE001
-                log.debug("could not send tools/list_changed: %s", exc)
+            await self._notify_tools_changed()
+            log.info("editor set changed (%d now); told the client to refresh",
+                     len(current))
 
     async def run_stdio(self) -> None:
         import anyio

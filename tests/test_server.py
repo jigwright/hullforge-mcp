@@ -53,14 +53,25 @@ async def wired(editor, tmp_path, monkeypatch):
 
 
 def catalog_names(result) -> list[str]:
-    """Tool names excluding hf_bridge_status.
+    """Tool names excluding the ones the sidecar synthesises.
 
-    That one is synthesised by the sidecar and always present, so including it
-    would make every catalog assertion about plumbing rather than about what
-    the editor actually advertises.
+    hf_bridge_status and hf_list_tool_areas are always present and are not the
+    editor's, so including them would make every catalog assertion about
+    plumbing rather than about what the editor actually advertises.
     """
-    from hullforge_mcp.server import _BRIDGE_STATUS_TOOL
-    return [t.name for t in result.tools if t.name != _BRIDGE_STATUS_TOOL.name]
+    from hullforge_mcp.server import (
+        _BRIDGE_STATUS_TOOL,
+        _DISABLE_AREAS_TOOL,
+        _ENABLE_AREAS_TOOL,
+        _LIST_AREAS_TOOL,
+    )
+    synthetic = {
+        _BRIDGE_STATUS_TOOL.name,
+        _LIST_AREAS_TOOL.name,
+        _ENABLE_AREAS_TOOL.name,
+        _DISABLE_AREAS_TOOL.name,
+    }
+    return [t.name for t in result.tools if t.name not in synthetic]
 
 
 class TestCatalog:
