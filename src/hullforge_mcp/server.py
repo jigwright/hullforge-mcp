@@ -204,6 +204,11 @@ _ACRONYMS = {
     "ui": "UI",
     "uv": "UV",
     "lod": "LOD",
+    # Plural too. Without it the LODs area shipped a page reading "Audit Lods"
+    # directly above "Set LOD Group", because the singular was in the table and
+    # the plural was not. Any acronym that appears in a plural tool name needs
+    # both forms here.
+    "lods": "LODs",
     "scc": "SCC",
 }
 
