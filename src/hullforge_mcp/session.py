@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -110,18 +111,45 @@ def read_session(path: str | os.PathLike[str]) -> SessionInfo:
 def session_registry_dir() -> Path:
     """Where editors advertise themselves, user-globally.
 
-    Mirrors HullForge::GetSessionRegistryDir on the C++ side. Scanning this
-    needs no configuration at all, which is what makes the sidecar
-    distributable - requiring every user to set HULLFORGE_PROJECT_DIR is
-    hostile, and it cannot describe two editors open at once.
+    Mirrors HullForge::GetSessionRegistryDir on the C++ side, which builds this
+    from FPlatformProcess::UserSettingsDir(). Scanning it needs no configuration
+    at all, which is what makes the connector distributable: requiring every
+    user to set HULLFORGE_PROJECT_DIR is hostile, and it cannot describe two
+    editors open at once.
+
+    The two sides MUST agree exactly. They are separate processes, often
+    separate languages, and a mismatch produces the worst possible symptom: the
+    connector starts fine, reports no editors, and the editor insists it is
+    advertising. Nothing is logged because nothing went wrong on either side.
+
+    Unreal's UserSettingsDir is not the same shape on every platform, and the
+    difference is not the obvious one:
+
+        Windows   %LOCALAPPDATA%                       (no vendor suffix)
+        macOS     ~/Library/Application Support/Epic/   (vendor suffix)
+        Linux     ~/.config/Epic/                       (vendor suffix)
+
+    An earlier version of this function used ~/.config on everything that was
+    not Windows. That is wrong twice over: the wrong base directory on macOS,
+    and a missing Epic/ component on both. It would have shipped as "works on
+    Windows, silently finds nothing anywhere else".
     """
-    if os.name == "nt":
-        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    if sys.platform == "win32":
+        # FWindowsPlatformProcess::UserSettingsDir returns FOLDERID_LocalAppData
+        # directly, with no vendor directory appended.
+        base = Path(os.environ.get("LOCALAPPDATA") or Path.home())
+    elif sys.platform == "darwin":
+        # FApplePlatformProcess::ApplicationSettingsDir is the Application
+        # Support folder with "/Epic/" appended.
+        base = Path.home() / "Library" / "Application Support" / "Epic"
     else:
-        base = os.environ.get(
-            "XDG_CONFIG_HOME", os.path.join(os.path.expanduser("~"), ".config")
-        )
-    return Path(base) / "HullForge" / "sessions"
+        # FUnixPlatformProcess::ApplicationSettingsDir is $HOME/.config/Epic/.
+        # Note it uses the home directory directly and ignores XDG_CONFIG_HOME,
+        # so honouring XDG here would reintroduce the mismatch on any machine
+        # that sets it.
+        base = Path.home() / ".config" / "Epic"
+
+    return base / "HullForge" / "sessions"
 
 
 def discover_all(project_dir: str | os.PathLike[str] | None = None) -> list[SessionInfo]:
