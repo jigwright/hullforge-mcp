@@ -89,6 +89,13 @@ _DESTRUCTIVE = {
 # do it inside an editor transaction that an undo really does reverse. Flagging
 # every mutation that loses something would make the flag meaningless, and a
 # reader who learns to ignore it also ignores it on hf_delete_asset.
+#
+# Same for hf_set_sequence_playback_range and hf_set_sequence_track_muted. Both
+# change one value on one object, both go through Modify() first, and both are
+# reversed by a single undo. Narrowing a playback range can leave sections
+# outside it and no longer evaluating, which looks destructive and is not: the
+# sections are untouched and widening the range brings them back. The tool says
+# so in not_checked rather than borrowing a flag that means something stronger.
 
 
 def _display_title(tool_name: str) -> str:
