@@ -78,7 +78,17 @@ _DESTRUCTIVE = {
     "hf_delete_blueprint_node",
     "hf_rename_asset",     # breaks anything referencing the old path
     "hf_open_level",       # discards unsaved changes
+    # Rewrites and SAVES every package that referenced a redirector, then
+    # deletes the redirectors. Nothing about it is undoable, and it is the only
+    # tool here that changes assets the caller did not name.
+    "hf_fix_redirectors",
 }
+
+# Deliberately NOT flagged, recorded so the question does not get reopened.
+# hf_remove_widget and hf_reparent_widget both destroy configuration, and both
+# do it inside an editor transaction that an undo really does reverse. Flagging
+# every mutation that loses something would make the flag meaningless, and a
+# reader who learns to ignore it also ignores it on hf_delete_asset.
 
 
 def _display_title(tool_name: str) -> str:

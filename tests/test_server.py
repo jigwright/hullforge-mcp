@@ -146,6 +146,37 @@ class TestCatalog:
         assert tools["hf_delete_asset"].annotations.destructive_hint is True
         assert tools["hf_create_material_instance"].annotations.destructive_hint is False
 
+    async def test_bulk_redirector_fix_is_flagged_destructive(self, wired):
+        """It rewrites and saves packages the caller never named.
+
+        Every other mutating tool changes the thing it was pointed at.
+        hf_fix_redirectors changes every asset that happened to reference one,
+        saves them, and deletes the redirectors, and none of it is undoable.
+        If any tool in the catalogue earns the flag, it is this one.
+        """
+        srv, editor = wired
+
+        @editor.tool("hf_describe_tools")
+        def _(msg):
+            return describe_reply(msg, [
+                {"name": "hf_fix_redirectors", "description": "", "mutating": True,
+                 "input_schema": {"type": "object"}},
+                {"name": "hf_find_redirectors", "description": "", "mutating": False,
+                 "input_schema": {"type": "object"}},
+                # Destroys configuration, but inside a transaction an undo
+                # really does reverse, so it must NOT be flagged. Flagging
+                # every lossy mutation makes the flag mean nothing.
+                {"name": "hf_remove_widget", "description": "", "mutating": True,
+                 "input_schema": {"type": "object"}},
+            ])
+
+        tools = {t.name: t for t in (await srv._handle_list_tools(None, None)).tools}
+        assert tools["hf_fix_redirectors"].annotations.destructive_hint is True
+        assert tools["hf_fix_redirectors"].annotations.read_only_hint is False
+        assert tools["hf_find_redirectors"].annotations.read_only_hint is True
+        assert tools["hf_find_redirectors"].annotations.destructive_hint is False
+        assert tools["hf_remove_widget"].annotations.destructive_hint is False
+
     async def test_internal_tools_are_hidden(self, wired):
         srv, editor = wired
 
