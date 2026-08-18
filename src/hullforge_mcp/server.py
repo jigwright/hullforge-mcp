@@ -56,10 +56,27 @@ _WATCH_INTERVAL_SECONDS = 1.0
 _CATALOG_MODE_ENV = "HULLFORGE_CATALOG_MODE"
 _CATALOG_AREAS_ENV = "HULLFORGE_CATALOG_AREAS"
 
-# The area that cannot be switched off. It holds the tools that answer "what is
-# this project and what can you do", which is where every session starts and
-# which the model needs before it can sensibly ask for anything else.
+# The area the connector's own synthetic tools belong to.
 _ALWAYS_ON_AREA = "Core"
+
+# The areas that cannot be switched off, and why each one earns it.
+#
+# The bar is not "useful". It is "hiding this makes the mode itself dangerous",
+# and only two clear it. The reasons are held here rather than written into the
+# refusal, so a third area added later has to state its case in the same place.
+_ALWAYS_ON_AREAS: frozenset[str] = frozenset({"Core", "Changes"})
+
+_WHY_ALWAYS_ON: dict[str, str] = {
+    "Core": (
+        "it holds the tools that answer what this project is and what else is "
+        "available, which is where every session starts"
+    ),
+    "Changes": (
+        "it holds the record of what has already been changed. That is what you "
+        "reach for when something has gone wrong, and needing to switch it on "
+        "first is the worst possible moment to discover it was hidden"
+    ),
+}
 
 # Where the area travels to any client that wants it, not just this one.
 #
@@ -132,7 +149,9 @@ _DISABLE_AREAS_TOOL = types.Tool(
     title="Disable Tool Areas",
     description=(
         "Remove one or more areas' tools from the tool list, freeing the "
-        "context they occupy. The Core area cannot be disabled."
+        "context they occupy. Core and Changes cannot be disabled: one is where "
+        "every session starts, the other is the record of what has already been "
+        "changed."
     ),
     input_schema={
         "type": "object",
@@ -291,7 +310,7 @@ class HullForgeServer:
         self._area_counts: dict[str, int] = {}
         # Seeded once, on the first connection, because the project's own
         # preference lives in the session file and there is no session yet.
-        self._enabled_areas: set[str] = {_ALWAYS_ON_AREA}
+        self._enabled_areas: set[str] = set(_ALWAYS_ON_AREAS)
         self._areas_seeded: bool = False
         self._session_catalog_mode: bool = False
         self._session_catalog_areas: tuple[str, ...] = ()
@@ -369,7 +388,7 @@ class HullForgeServer:
 
         from_env = _preloaded_areas()
         seed = from_env if from_env is not None else set(info.catalog_areas)
-        self._enabled_areas = {_ALWAYS_ON_AREA} | seed
+        self._enabled_areas = set(_ALWAYS_ON_AREAS) | seed
 
     def _catalog_mode(self) -> bool:
         """Catalog mode as it applies right now.
@@ -535,7 +554,7 @@ class HullForgeServer:
                 "name": area,
                 "tool_count": count,
                 "listed": (not enabled) or area in self._enabled_areas,
-                "always_on": area == _ALWAYS_ON_AREA,
+                "always_on": area in _ALWAYS_ON_AREAS,
             }
             for area, count in sorted(self._area_counts.items())
         ]
@@ -563,7 +582,7 @@ class HullForgeServer:
                 f"Catalog mode is off, so every tool is listed. Set "
                 f"{_CATALOG_MODE_ENV}=1 in the connector's environment to turn it "
                 f"on, and optionally {_CATALOG_AREAS_ENV}=Materials,Blueprints to "
-                f"start with particular areas already listed. Or turn it on per PROJECT at Project Settings > Plugins > HullForge > Catalog mode, which needs no client restart. The environment variable wins when it is set. Core is always on."
+                f"start with particular areas already listed. Or turn it on per PROJECT at Project Settings > Plugins > HullForge > Catalog mode, which needs no client restart. The environment variable wins when it is set. Core and Changes are always on."
             )
             lines = [
                 f"Catalog mode is off: all {total} tools are listed, across "
@@ -619,15 +638,15 @@ class HullForgeServer:
 
         refused: list[str] = []
         if not enable:
-            refused = [a for a in resolved if a == _ALWAYS_ON_AREA]
-            resolved = [a for a in resolved if a != _ALWAYS_ON_AREA]
+            refused = [a for a in resolved if a in _ALWAYS_ON_AREAS]
+            resolved = [a for a in resolved if a not in _ALWAYS_ON_AREAS]
 
         before = set(self._enabled_areas)
         if enable:
             self._enabled_areas |= set(resolved)
         else:
             self._enabled_areas -= set(resolved)
-        self._enabled_areas.add(_ALWAYS_ON_AREA)
+        self._enabled_areas |= set(_ALWAYS_ON_AREAS)
 
         changed = self._enabled_areas != before
         if changed:
@@ -643,10 +662,13 @@ class HullForgeServer:
             f"{verb} {', '.join(resolved) if resolved else 'nothing'}. "
             f"{listed} of {sum(self._area_counts.values())} tools are now listed."
         ]
-        if refused:
+        for area in refused:
+            # Named one at a time with its own reason. A refusal that lists two
+            # areas and gives one reason leaves the caller guessing which
+            # applied, and a refusal that does not say why reads as arbitrary.
             lines.append(
-                f"{_ALWAYS_ON_AREA} cannot be disabled: it holds the tools that "
-                f"answer what this project is and what else is available."
+                f"{area} cannot be disabled: "
+                f"{_WHY_ALWAYS_ON.get(area, 'it is always on')}."
             )
         if not changed:
             lines.append("Nothing changed; those areas were already in that state.")
