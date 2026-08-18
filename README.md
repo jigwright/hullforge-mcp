@@ -97,8 +97,15 @@ result.
 ## Installing
 
 Most people should not build this. Install the packaged `.mcpb` bundle, which
-contains a compiled binary and needs no Python. See the
-[documentation](https://jigwright.com/hullforge/docs).
+contains a compiled binary and needs no Python.
+
+In Claude Desktop: **Settings > Extensions > Advanced settings > Extension
+Developer > Install Extension...**
+
+Double-clicking the `.mcpb` also works where the OS has an association
+registered for it, but the menu above is reliable everywhere.
+
+Full instructions: [jigwright.com/hullforge/docs](https://jigwright.com/hullforge/docs)
 
 ## Privacy
 
