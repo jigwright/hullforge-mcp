@@ -61,7 +61,20 @@ _CATALOG_AREAS_ENV = "HULLFORGE_CATALOG_AREAS"
 # which the model needs before it can sensibly ask for anything else.
 _ALWAYS_ON_AREA = "Core"
 
+# Where the area travels to any client that wants it, not just this one.
+#
+# MCP's _meta is the sanctioned extension point and a domain-prefixed key is the
+# convention. It is here because the docs generator needs the area too, and the
+# alternative was a second hand-maintained category list in Python - which is
+# exactly the drift this whole feature exists to remove. It had already
+# happened: the generator's own list had 63 of 120 tools filed under "Other".
+_AREA_META_KEY = "jigwright.com/area"
+
 _LIST_AREAS_TOOL = types.Tool(
+    # Core, like the editor tools it sits beside, so anything reading
+    # _meta to group tools gets a complete answer and needs no special
+    # case for the ones the sidecar synthesises.
+    meta={_AREA_META_KEY: _ALWAYS_ON_AREA},
     name="hf_list_tool_areas",
     title="List Tool Areas",
     description=(
@@ -77,6 +90,10 @@ _LIST_AREAS_TOOL = types.Tool(
 )
 
 _ENABLE_AREAS_TOOL = types.Tool(
+    # Core, like the editor tools it sits beside, so anything reading
+    # _meta to group tools gets a complete answer and needs no special
+    # case for the ones the sidecar synthesises.
+    meta={_AREA_META_KEY: _ALWAYS_ON_AREA},
     name="hf_enable_tool_areas",
     title="Enable Tool Areas",
     description=(
@@ -107,6 +124,10 @@ _ENABLE_AREAS_TOOL = types.Tool(
 )
 
 _DISABLE_AREAS_TOOL = types.Tool(
+    # Core, like the editor tools it sits beside, so anything reading
+    # _meta to group tools gets a complete answer and needs no special
+    # case for the ones the sidecar synthesises.
+    meta={_AREA_META_KEY: _ALWAYS_ON_AREA},
     name="hf_disable_tool_areas",
     title="Disable Tool Areas",
     description=(
@@ -156,6 +177,10 @@ def _preloaded_areas() -> set[str]:
 # up as an empty tool list, which is silent and baffling - the user has no way
 # to tell a broken install from an editor they forgot to open.
 _BRIDGE_STATUS_TOOL = types.Tool(
+    # Core, like the editor tools it sits beside, so anything reading
+    # _meta to group tools gets a complete answer and needs no special
+    # case for the ones the sidecar synthesises.
+    meta={_AREA_META_KEY: _ALWAYS_ON_AREA},
     name="hf_bridge_status",
     title="Bridge Status",
     description=(
@@ -346,6 +371,7 @@ class HullForgeServer:
                 title=_display_title(name),
                 description=entry.get("description", ""),
                 input_schema=schema,
+                meta={_AREA_META_KEY: areas[name]},
                 annotations=types.ToolAnnotations(
                     read_only_hint=not mutating_flag,
                     destructive_hint=destructive,

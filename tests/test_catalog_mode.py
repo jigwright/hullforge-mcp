@@ -357,6 +357,33 @@ class TestListAreas:
         assert result.structured_content["area_count"] == 3
 
 
+class TestAreaTravelsInMeta:
+    async def test_every_tool_carries_its_area(self, wired, monkeypatch):
+        """So a client other than this one can group by area too.
+
+        The docs generator is the immediate consumer. Without this it kept its
+        own hand-maintained category list, and that list had drifted until 63 of
+        120 tools were filed under "Other" on the published site.
+        """
+        monkeypatch.delenv(_CATALOG_MODE_ENV, raising=False)
+        srv, _ = wired
+
+        from hullforge_mcp.server import _AREA_META_KEY
+
+        listed = await srv._handle_list_tools(None, None)
+        by_name = {t.name: t for t in listed.tools}
+
+        assert by_name["hf_describe_material"].meta[_AREA_META_KEY] == "Materials"
+        assert by_name["hf_describe_sequence"].meta[_AREA_META_KEY] == "Sequencer"
+
+    async def test_the_key_is_namespaced(self):
+        """MCP reserves the unprefixed space; extensions carry a domain."""
+        from hullforge_mcp.server import _AREA_META_KEY
+
+        assert "/" in _AREA_META_KEY
+        assert not _AREA_META_KEY.startswith("modelcontextprotocol.io")
+
+
 class TestOlderEditor:
     async def test_derives_areas_when_the_editor_does_not_report_them(
         self, editor, tmp_path, monkeypatch
