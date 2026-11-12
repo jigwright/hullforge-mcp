@@ -59,6 +59,41 @@ list forever, since the client has no reason to ask again.
 One tool, `hf_bridge_status`, is implemented here rather than in the editor. It
 is therefore always available, so "no tools" is never a silent state.
 
+## Gateway mode (recommended for Claude Code and Claude Desktop)
+
+The editor offers about 3,000 tools. Listed in full, their names alone cost
+Claude Code about 78,000 tokens of context per session, and the Claude clients
+don't pick up a tool list that changes mid-session. Gateway mode lists five
+fixed tools instead, whatever the editor holds and whether or not it is open:
+
+| Tool | Does |
+| --- | --- |
+| `hf_search_tools` | Finds tools from plain words; with only an area, lists that area |
+| `hf_tool_schema` | Exact arguments and description of up to 10 tools |
+| `hf_read` | Calls a read-only tool |
+| `hf_write` | Calls a tool that changes the project, verified by read-back as always |
+| `hf_destroy` | Calls a destructive tool; refused unless `confirm` is true |
+
+```
+HULLFORGE_TOOL_MODE=gateway
+```
+
+Every call is checked against the tool's real schema before it reaches the
+editor, and a refusal returns the schema. A destructive tool sent through
+`hf_write`, or a write sent through `hf_read`, is refused rather than rerouted,
+so permission rules on the three callers keep their meaning. The five tools
+carry `anthropic/alwaysLoad`, so Claude Code loads them without a search step.
+
+Measured with [hullforge-evals](https://github.com/jigwright/hullforge-evals)
+(Sonnet, Claude Code headless):
+
+| Suite | Full list (3,058 tools) | `@general` preset | Gateway |
+| --- | ---: | ---: | ---: |
+| 20 core tasks, passed | 39/40 | 39/40 | **40/40** |
+| 17 tasks outside `@general`, passed | 21/21 | 4/20 | **20/20** |
+| Startup context | 87k tokens | 28k | **21k** |
+| Cold cost per task, core | $0.35 | $0.10 | **$0.06** |
+
 ## Catalog mode
 
 The editor advertises well over a hundred tools. Listing all of them costs the
@@ -112,16 +147,10 @@ discoverable without being imposed. A tool from an area that is not listed is
 refused rather than quietly run, for the same reason: a hidden tool that works
 anyway would make the list advice.
 
-**In Claude Code, preset the areas.** Switching areas on mid-session depends on
-the client re-reading the tool list after `tools/list_changed`, and Claude Code
-never does, so areas enabled that way never become callable there. Areas named in
-`HULLFORGE_CATALOG_AREAS` are listed from startup, which Claude Code does see, so
-pick a preset for the work (`@general` if unsure).
-Measured with [hullforge-evals](https://github.com/jigwright/hullforge-evals) on
-20 tasks: `@general` (the same seven areas) passed the same 39 of 40 runs as the
-full list, with 88k tokens of context per run instead of 265k, and $2.60 total
-instead of $8.34 (API-equivalent). With no preset, leave catalog mode off in
-Claude Code; its tool search handles the full list.
+**In Claude Code and Claude Desktop, use gateway mode instead.** Switching areas
+on mid-session depends on the client re-reading the tool list after
+`tools/list_changed`, which neither does, and a preset gives up every area it
+leaves out. Presets remain for clients that need a fixed native list.
 
 ## Reliability
 
