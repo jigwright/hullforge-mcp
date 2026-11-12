@@ -22,6 +22,7 @@ import mcp.types as types
 from mcp.server.lowlevel import NotificationOptions, Server
 
 from .client import BridgeClient, BridgeError, ToolFailed, ToolOutcomeUnknown
+from . import gateway as _gateway
 from . import presets as _presets
 from .session import (
     SessionError,
@@ -241,6 +242,11 @@ def _preloaded_tokens() -> list[str]:
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
+def _gateway_mode() -> bool:
+    """HULLFORGE_TOOL_MODE=gateway: list five fixed tools instead of the catalog."""
+    return os.environ.get(_gateway.MODE_ENV, "").strip().lower() == "gateway"
+
+
 def _tool_preset_tokens() -> list[str]:
     """HULLFORGE_TOOL_PRESET's entries. A bare preset name gets its "@", so a
     settings field can take "general" as well as "@general"."""
@@ -349,10 +355,14 @@ class HullForgeServer:
         self._mutating: set[str] = set()
         self._session_key: tuple[int, str] | None = None
         self._mcp_session: Any = None
+        # Gateway mode is decided once, at launch, like everything else that
+        # shapes the tool list: a list that changes is the problem it solves.
+        self._gateway = _gateway_mode()
+        self._index = _gateway.Index()
         self.server: Server = Server(
             "hullforge",
             version="0.1.0",
-            instructions=(
+            instructions=_gateway.INSTRUCTIONS if self._gateway else (
                 "Drives a running Unreal Engine 5.8 editor. If no tools beyond "
                 "hf_bridge_status are listed, no editor is open - start one and the "
                 "rest appear automatically, without restarting this client. Tools "
@@ -507,6 +517,8 @@ class HullForgeServer:
         self._catalog = tools
         self._mutating = mutating
         self._areas = areas
+        if self._gateway:
+            self._index.rebuild(tools, areas, mutating)
 
         # Counts come from what will actually be LISTED, not from the editor's
         # own totals. The editor counts every registered tool including the
@@ -776,6 +788,12 @@ class HullForgeServer:
             log.info("no editor available: %s", exc)
             tools = []
 
+        if self._gateway:
+            # The same list whether or not an editor is open, and whatever the
+            # editor holds. Clients that read the list once (Claude Desktop
+            # does) would otherwise be stuck with whatever they saw first.
+            return types.ListToolsResult(tools=[_BRIDGE_STATUS_TOOL, *_gateway.TOOLS])
+
         # Deliberately no ttl_ms: the catalog changes whenever HullForge.Reload
         # runs, and a cached stale catalog is worse than re-fetching.
         return types.ListToolsResult(
@@ -795,6 +813,19 @@ class HullForgeServer:
 
         if name == _BRIDGE_STATUS_TOOL.name:
             return self._bridge_status()
+
+        if self._gateway:
+            if name in _gateway.NAMES:
+                return await self._gateway_call(name, args)
+            # Not listed, so not callable: the same rule as catalog mode. The
+            # remedy is named rather than the call quietly routed, so that a
+            # client's permission rules for hf_read/hf_write/hf_destroy cannot
+            # be stepped around by calling the inner tool by name.
+            return _error(
+                f"'{name}' is not called directly in gateway mode. Find it with "
+                f"hf_search_tools, check its arguments with hf_tool_schema, then call "
+                f"it through hf_read, hf_write or hf_destroy. Nothing was changed."
+            )
 
         if name == _LIST_AREAS_TOOL.name:
             # Refresh first: asking what areas exist when the catalog has never
@@ -837,6 +868,11 @@ class HullForgeServer:
                     f"Nothing was changed."
                 )
 
+        return await self._dispatch(name, args)
+
+    async def _dispatch(self, name: str, args: dict[str, Any]) -> types.CallToolResult:
+        """Send one call to the editor, with the transport retry and the
+        outcome-unknown handling. Shared by direct calls and the gateway."""
         is_mutating = name in self._mutating
 
         # One operation_id for the whole logical operation, reused across our
@@ -898,6 +934,142 @@ class HullForgeServer:
 
         # Unreachable in practice; the loop returns on every path.
         return _error(f"Bridge error calling '{name}': {last_error}")
+
+    # -- gateway mode ------------------------------------------------------
+
+    async def _gateway_call(self, name: str, args: dict[str, Any]) -> types.CallToolResult:
+        if not len(self._index):
+            try:
+                await self._refresh_catalog()
+            except (SessionError, BridgeError) as exc:
+                return _error(str(exc))
+        if name == _gateway.SEARCH:
+            return self._gateway_search(args)
+        if name == _gateway.SCHEMA:
+            return self._gateway_schema(args)
+        return await self._gateway_invoke(name, args)
+
+    def _suggest(self, text: str, limit: int = 5) -> list[str]:
+        return [e.name for _, e in self._index.search(text.replace("_", " "), limit=limit)]
+
+    def _gateway_search(self, args: dict[str, Any]) -> types.CallToolResult:
+        query = str(args.get("query") or "").strip()
+        limit = max(1, min(int(args.get("limit") or 8), 25))
+        kind = args.get("kind") or None
+        area = None
+        if args.get("area"):
+            area = self._index.resolve_area(str(args["area"]))
+            if area is None:
+                return _error(
+                    f"No area named '{args['area']}'. Areas: "
+                    f"{', '.join(self._index.areas())}. Nothing was searched."
+                )
+
+        if not query and area is None:
+            counts = self._index.areas()
+            lines = [f"{len(counts)} areas, {len(self._index)} tools. Search with a query, "
+                     f"or pass an area to list its tools."]
+            lines += [f"  {a} ({n})" for a, n in counts.items()]
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text="\n".join(lines))],
+                structured_content={"areas": counts},
+            )
+
+        if not query:
+            entries = sorted((e for e in self._index.entries.values()
+                              if e.area == area and (not kind or e.kind == kind)),
+                             key=lambda e: e.name)
+            hits = [(0.0, e) for e in entries]
+            header = f"{len(entries)} tools in {area}."
+        else:
+            hits = self._index.search(query, area=area, kind=kind, limit=limit)
+            header = (f"{len(hits)} matches for '{query}'"
+                      + (f" in {area}" if area else "") + ". Next: hf_tool_schema with the "
+                      "names you will call." if hits else
+                      f"Nothing matched '{query}'. Try other words, or list an area "
+                      f"(hf_search_tools with only 'area').")
+
+        rows = [{"name": e.name, "area": e.area, "kind": e.kind,
+                 "call_with": _gateway.caller_for(e.kind),
+                 "required": _gateway.required_args(e), "summary": e.summary} for _, e in hits]
+        lines = [header]
+        for r in rows:
+            lines.append(f"- {r['name']}  [{r['area']} | {r['kind']} -> {r['call_with']}]\n"
+                         f"    {r['summary']}")
+            for arg, about in r["required"].items():
+                lines.append(f"    required {arg} ({about})")
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text="\n".join(lines))],
+            structured_content={"results": rows},
+        )
+
+    def _gateway_schema(self, args: dict[str, Any]) -> types.CallToolResult:
+        names = args.get("names") or []
+        if not isinstance(names, list) or not names:
+            return _error("'names' must be a non-empty array of tool names from hf_search_tools.")
+        out: list[dict[str, Any]] = []
+        for raw in names[:10]:
+            entry = self._index.entries.get(str(raw))
+            if entry is None:
+                out.append({"name": raw, "error": "no such tool",
+                            "did_you_mean": self._suggest(str(raw))})
+                continue
+            out.append({
+                "name": entry.name, "area": entry.area, "kind": entry.kind,
+                "call_with": _gateway.caller_for(entry.kind),
+                "description": entry.description,
+                "input_schema": entry.schema,
+            })
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text=json.dumps(out, indent=2))],
+            structured_content={"tools": out},
+        )
+
+    async def _gateway_invoke(self, caller: str, args: dict[str, Any]) -> types.CallToolResult:
+        tool = str(args.get("tool") or "")
+        inner = args.get("args") or {}
+        if not isinstance(inner, dict):
+            return _error("'args' must be an object of the tool's arguments. Nothing was changed.")
+        entry = self._index.entries.get(tool)
+        if entry is None:
+            hint = self._suggest(tool)
+            return _error(
+                f"No tool named '{tool}'."
+                + (f" Closest: {', '.join(hint)}." if hint else "")
+                + " Find tools with hf_search_tools. Nothing was changed."
+            )
+
+        wanted = _gateway.kind_of_caller(caller)
+        if entry.kind != wanted:
+            # Refused, not rerouted. The caller is what a client's permission
+            # rules see; a destroy that arrived as hf_write would get past a
+            # rule that asks before every hf_destroy.
+            return _error(
+                f"'{tool}' is a {entry.kind} tool, so it is called with "
+                f"{_gateway.caller_for(entry.kind)}, not {caller}. Nothing was changed."
+            )
+
+        if caller == _gateway.DESTROY:
+            if args.get("confirm") is not True:
+                return _error(
+                    f"hf_destroy refused '{tool}': confirm must be true. Set it only "
+                    f"for a deletion the user asked for. Nothing was changed."
+                )
+            props = entry.schema.get("properties") or {}
+            if "confirm" in props and "confirm" not in inner:
+                inner = {**inner, "confirm": True}
+
+        problems = _gateway.validate(entry, inner)
+        if problems:
+            # The schema comes back with the refusal, so the next attempt can
+            # be right without another round-trip to hf_tool_schema.
+            return _error(
+                f"Arguments for '{tool}' don't match its schema, so nothing was sent "
+                f"to the editor:\n- " + "\n- ".join(problems)
+                + f"\n\nSchema for {tool}:\n{json.dumps(entry.schema, indent=2)}"
+            )
+
+        return await self._dispatch(tool, inner)
 
     @staticmethod
     def _to_content(name: str, result: dict[str, Any], deduplicated: bool = False) -> list[Any]:
