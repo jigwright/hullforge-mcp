@@ -73,7 +73,11 @@ HULLFORGE_CATALOG_MODE=1                    turn it on
 HULLFORGE_CATALOG_AREAS=Materials,Sequencer start with those already listed
 HULLFORGE_CATALOG_AREAS=@level              or a preset, for a kind of work
 HULLFORGE_CATALOG_AREAS=@materials,Audio    presets and areas mix
+HULLFORGE_TOOL_PRESET=@general              one setting: catalog mode on, with this preset
 ```
+
+`HULLFORGE_TOOL_PRESET` is for places that offer one field, like the desktop
+extension's settings. Blank means no preset; the two variables above win when set.
 
 Presets (Core and Changes are always added; tool counts from UE 5.8):
 

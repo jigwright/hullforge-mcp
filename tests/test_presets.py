@@ -108,3 +108,39 @@ class TestServer:
         finally:
             if srv._client is not None:
                 await srv._client.close()
+
+
+class TestToolPresetVariable:
+    """HULLFORGE_TOOL_PRESET: one field for the desktop extension's settings."""
+
+    @pytest.fixture(autouse=True)
+    def clean(self, monkeypatch):
+        for v in (_CATALOG_MODE_ENV, _CATALOG_AREAS_ENV, "HULLFORGE_TOOL_PRESET"):
+            monkeypatch.delenv(v, raising=False)
+
+    def test_turns_catalog_mode_on_with_the_preset(self, monkeypatch):
+        from hullforge_mcp.server import _catalog_mode_override
+        monkeypatch.setenv("HULLFORGE_TOOL_PRESET", "@audio")
+        assert _catalog_mode_override() is True
+        assert _preloaded_areas() == set(presets.PRESETS["audio"].areas)
+
+    def test_bare_name_works(self, monkeypatch):
+        monkeypatch.setenv("HULLFORGE_TOOL_PRESET", "audio")
+        assert _preloaded_areas() == set(presets.PRESETS["audio"].areas)
+
+    def test_blank_means_nothing(self, monkeypatch):
+        from hullforge_mcp.server import _catalog_mode_override
+        monkeypatch.setenv("HULLFORGE_TOOL_PRESET", "  ")
+        assert _catalog_mode_override() is None
+        assert _preloaded_areas() is None
+
+    def test_catalog_mode_variable_wins(self, monkeypatch):
+        from hullforge_mcp.server import _catalog_mode_override
+        monkeypatch.setenv("HULLFORGE_TOOL_PRESET", "@audio")
+        monkeypatch.setenv(_CATALOG_MODE_ENV, "0")
+        assert _catalog_mode_override() is False
+
+    def test_areas_variable_wins(self, monkeypatch):
+        monkeypatch.setenv("HULLFORGE_TOOL_PRESET", "@audio")
+        monkeypatch.setenv(_CATALOG_AREAS_ENV, "Materials")
+        assert _preloaded_areas() == {"Materials"}

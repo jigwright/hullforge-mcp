@@ -56,6 +56,12 @@ _WATCH_INTERVAL_SECONDS = 1.0
 # would save whether or not it is on.
 _CATALOG_MODE_ENV = "HULLFORGE_CATALOG_MODE"
 _CATALOG_AREAS_ENV = "HULLFORGE_CATALOG_AREAS"
+# One setting for "this kind of work": a preset (or areas) that also turns
+# catalog mode on. Made for the desktop extension's settings form, where a
+# single field that can be left blank is what a person can be asked to fill.
+# Blank means nothing at all, unlike an empty HULLFORGE_CATALOG_AREAS. The two
+# specific variables win when they are set.
+_TOOL_PRESET_ENV = "HULLFORGE_TOOL_PRESET"
 
 # The area the connector's own synthetic tools belong to.
 _ALWAYS_ON_AREA = "Core"
@@ -199,6 +205,8 @@ def _catalog_mode_override() -> bool | None:
         return True
     if raw in _FALSEISH:
         return False
+    if _tool_preset_tokens():
+        return True
     return None
 
 
@@ -213,7 +221,7 @@ def _preloaded_areas() -> set[str] | None:
     nothing but Core" and overrides a project list rather than falling back to
     it. The two need to be distinguishable for the same reason the mode does.
     """
-    if _CATALOG_AREAS_ENV not in os.environ:
+    if _CATALOG_AREAS_ENV not in os.environ and not _tool_preset_tokens():
         return None
     areas, unknown = _presets.expand(_preloaded_tokens())
     if unknown:
@@ -225,9 +233,21 @@ def _preloaded_areas() -> set[str] | None:
 
 
 def _preloaded_tokens() -> list[str]:
-    """The variable's comma-separated entries: area names and @presets."""
+    """The areas variable's comma-separated entries (area names and
+    @presets), or the tool-preset variable's when the areas one is unset."""
+    if _CATALOG_AREAS_ENV not in os.environ:
+        return _tool_preset_tokens()
     raw = os.environ.get(_CATALOG_AREAS_ENV, "")
     return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _tool_preset_tokens() -> list[str]:
+    """HULLFORGE_TOOL_PRESET's entries. A bare preset name gets its "@", so a
+    settings field can take "general" as well as "@general"."""
+    raw = os.environ.get(_TOOL_PRESET_ENV, "")
+    tokens = [part.strip() for part in raw.split(",") if part.strip()]
+    return [_presets.PRESET_PREFIX + t if not _presets.is_preset(t) and t.lower() in _presets.PRESETS else t
+            for t in tokens]
 
 # Always present, even with no editor running. Without this, "no editor" shows
 # up as an empty tool list, which is silent and baffling - the user has no way
@@ -592,7 +612,7 @@ class HullForgeServer:
         # Problems a person can act on, said where they will look. A preset or
         # an area that matches nothing would otherwise just list fewer tools.
         problems: list[str] = []
-        if known and _CATALOG_AREAS_ENV in os.environ:
+        if known and _preloaded_tokens():
             _, bad_presets = _presets.expand(_preloaded_tokens())
             bad_areas = [t for t in _preloaded_tokens()
                          if not _presets.is_preset(t) and t not in known]
