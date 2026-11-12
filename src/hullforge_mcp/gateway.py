@@ -1,10 +1,9 @@
-"""Gateway mode: five fixed tools in front of the whole editor.
+"""The gateway: five fixed tools in front of the whole editor.
 
 The editor offers about 3,000 tools. Listing them all costs a client tens of
 thousands of tokens before any work starts, and changing the list mid-session
 does not help, because the clients that matter (Claude Code, Claude Desktop)
-do not reliably pick up a changed list. So in gateway mode the list never
-changes. It holds:
+do not reliably pick up a changed list. So the list never changes. It holds:
 
     hf_search_tools   find tools by what they do
     hf_tool_schema    fetch the exact arguments of the tools you will call
@@ -34,8 +33,6 @@ try:  # jsonschema ships with the MCP SDK, but validation should degrade, not cr
     from jsonschema import Draft202012Validator
 except Exception:  # pragma: no cover
     Draft202012Validator = None  # type: ignore[assignment]
-
-MODE_ENV = "HULLFORGE_TOOL_MODE"
 
 SEARCH = "hf_search_tools"
 SCHEMA = "hf_tool_schema"

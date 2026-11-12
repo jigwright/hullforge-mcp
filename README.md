@@ -15,9 +15,9 @@ HullForge is two programs.
 | **The editor plugin** | A separate, proprietary Unreal Engine plugin that holds every tool and does all the work. Licensed under its own EULA and distributed via Fab. Not in this repository. |
 
 The connector contains **no Unreal Engine logic**. It is transport, framing,
-session discovery, and the MCP surface. On its own it does nothing useful: with
-no editor running it exposes exactly one tool, which tells you no editor is
-running.
+session discovery, and the MCP surface: five fixed tools that reach every tool
+the editor holds. On its own it does nothing useful: with no editor running,
+`hf_bridge_status` tells you so and the other tools say the same.
 
 ## Why it is a separate process
 
@@ -50,109 +50,50 @@ process id. The connector scans that directory, filters by whether the process
 is actually alive, and prefers the editor it is already connected to so a second
 editor opening does not silently move the target mid-conversation.
 
-It declares the MCP `listChanged` capability and watches that registry, so tools
-appear when an editor opens and disappear when it closes, **without restarting
-the client**. That matters because MCP servers are launched by the client: a
-connector that starts before the editor would otherwise report an empty tool
-list forever, since the client has no reason to ask again.
+It watches that registry, so an editor that opens after the client started is
+picked up on the next call, **without restarting the client**, and a closed one
+is dropped rather than leaving a dead connection behind.
 
-One tool, `hf_bridge_status`, is implemented here rather than in the editor. It
-is therefore always available, so "no tools" is never a silent state.
+`hf_bridge_status` is implemented here rather than in the editor, so it always
+answers, and "no editor" is never a silent state.
 
-## Gateway mode (recommended for Claude Code and Claude Desktop)
+## The tools
 
-The editor offers about 3,000 tools. Listed in full, their names alone cost
-Claude Code about 78,000 tokens of context per session, and the Claude clients
-don't pick up a tool list that changes mid-session. Gateway mode lists five
-fixed tools instead, whatever the editor holds and whether or not it is open:
+The editor offers about 3,000 tools. Listed in full, their names alone would
+cost Claude Code about 78,000 tokens of context per session, and the Claude
+clients don't pick up a tool list that changes mid-session. So the connector
+lists five fixed tools that reach all of them, the same whether or not an
+editor is open:
 
 | Tool | Does |
 | --- | --- |
-| `hf_search_tools` | Finds tools from plain words; with only an area, lists that area |
+| `hf_search_tools` | Finds tools from plain words; with only an area, lists that area; with nothing, lists the areas |
 | `hf_tool_schema` | Exact arguments and description of up to 10 tools |
 | `hf_read` | Calls a read-only tool |
 | `hf_write` | Calls a tool that changes the project, verified by read-back as always |
 | `hf_destroy` | Calls a destructive tool; refused unless `confirm` is true |
 
-```
-HULLFORGE_TOOL_MODE=gateway      five fixed tools (recommended)
-HULLFORGE_TOOL_MODE=full         every tool listed, the default
-HULLFORGE_TOOL_MODE=general      a preset (see Catalog mode)
-```
+Search runs here, over the editor's catalog: ranked by name, first sentence,
+area and description, with Unreal synonyms ("keyframe", "terrain", "VFX") and
+each required argument's meaning shown with every hit.
 
 Every call is checked against the tool's real schema before it reaches the
 editor, and a refusal returns the schema. A destructive tool sent through
 `hf_write`, or a write sent through `hf_read`, is refused rather than rerouted,
-so permission rules on the three callers keep their meaning. The five tools
-carry `anthropic/alwaysLoad`, so Claude Code loads them without a search step.
+so permission rules on the three callers keep their meaning. Calling an editor
+tool directly by name is refused too. The five tools carry
+`anthropic/alwaysLoad`, so Claude Code loads them without a search step.
 
 Measured with [hullforge-evals](https://github.com/jigwright/hullforge-evals)
-(Sonnet, Claude Code headless):
+(Sonnet, Claude Code headless), against listing every tool and against the
+seven-area preset that came before this design:
 
-| Suite | Full list (3,058 tools) | `@general` preset | Gateway |
+| Suite | Every tool listed | Seven-area preset | Gateway |
 | --- | ---: | ---: | ---: |
 | 20 core tasks, passed | 39/40 | 39/40 | **40/40** |
-| 17 tasks outside `@general`, passed | 21/21 | 4/20 | **20/20** |
+| 17 tasks across other areas, passed | 21/21 | 4/20 | **20/20** |
 | Startup context | 87k tokens | 28k | **21k** |
 | Cold cost per task, core | $0.35 | $0.10 | **$0.06** |
-
-## Catalog mode
-
-The editor advertises well over a hundred tools. Listing all of them costs the
-model tens of thousands of tokens of context before it has done anything, and
-most of a session touches two or three areas.
-
-Set `HULLFORGE_CATALOG_MODE=1` and the tool list holds a small always-on core
-plus whatever areas have been switched on:
-
-```
-HULLFORGE_CATALOG_MODE=1                    turn it on
-HULLFORGE_CATALOG_AREAS=Materials,Sequencer start with those already listed
-HULLFORGE_CATALOG_AREAS=@level              or a preset, for a kind of work
-HULLFORGE_CATALOG_AREAS=@materials,Audio    presets and areas mix
-HULLFORGE_TOOL_PRESET=@general              one setting: catalog mode on, with this preset
-```
-
-`HULLFORGE_TOOL_PRESET` is for places that offer one field, like the desktop
-extension's settings. Blank means no preset; the two variables above win when set.
-
-Presets (Core and Changes are always added; tool counts from UE 5.8):
-
-| Preset | Tools | For |
-| --- | ---: | --- |
-| `@general` | 410 | Everyday editing: actors, assets, Blueprints, materials, lights |
-| `@level` | 646 | Levels: landscape, foliage, meshes, splines, world partition |
-| `@materials` | 367 | Materials, material instances, textures |
-| `@blueprints` | 392 | Blueprint classes, components, input, game framework |
-| `@gameplay` | 458 | GAS, gameplay tags, AI, StateTree, navigation |
-| `@animation` | 591 | Animation, Control Rig, IK rigs, retargeting |
-| `@cinematics` | 528 | Sequencer, cameras, movie rendering |
-| `@vfx` | 377 | Niagara and its materials |
-| `@audio` | 254 | Sound assets, MetaSounds |
-| `@ui` | 352 | UMG, view models |
-| `@pcg` | 499 | PCG graphs, splines, foliage, landscape |
-
-`hf_list_tool_areas` lists the presets with live counts, and warns about a preset
-or area name that matches nothing, instead of quietly listing fewer tools.
-
-`hf_list_tool_areas` shows every area with its tool count and whether it is
-listed. `hf_enable_tool_areas` and `hf_disable_tool_areas` change the set, and
-the tool list updates immediately through the same `tools/list_changed`
-mechanism that makes tools appear when an editor opens. The `Core` area is
-always on and cannot be disabled.
-
-**It is off by default and that is deliberate.** The whole argument for this
-connector is that the tool list is the truth about what the editor will
-dispatch, and a mode that silently hides two thirds of it should be asked for
-rather than assumed. `hf_list_tool_areas` is listed either way, so the mode is
-discoverable without being imposed. A tool from an area that is not listed is
-refused rather than quietly run, for the same reason: a hidden tool that works
-anyway would make the list advice.
-
-**In Claude Code and Claude Desktop, use gateway mode instead.** Switching areas
-on mid-session depends on the client re-reading the tool list after
-`tools/list_changed`, which neither does, and a preset gives up every area it
-leaves out. Presets remain for clients that need a fixed native list.
 
 ## Reliability
 

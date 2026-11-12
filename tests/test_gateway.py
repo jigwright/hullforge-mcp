@@ -1,4 +1,4 @@
-"""Gateway mode: five fixed tools in front of the whole catalog.
+"""The gateway: five fixed tools in front of the whole catalog.
 
 What matters, in order:
   THE LIST NEVER CHANGES. Same five tools with or without an editor, whatever
@@ -62,9 +62,6 @@ async def gw(editor, tmp_path, monkeypatch):
     from hullforge_mcp import server as server_mod
     from hullforge_mcp.session import SessionInfo
 
-    monkeypatch.setenv(gateway.MODE_ENV, "gateway")
-    for v in ("HULLFORGE_CATALOG_MODE", "HULLFORGE_CATALOG_AREAS", "HULLFORGE_TOOL_PRESET"):
-        monkeypatch.delenv(v, raising=False)
     info = SessionInfo(port=editor.port, token=editor.token, pid=0, project_name="FakeProject")
     monkeypatch.setattr(server_mod, "discover_all", lambda _dir=None: [info])
 
@@ -108,7 +105,6 @@ class TestFixedList:
 
     async def test_same_list_with_no_editor(self, tmp_path, monkeypatch):
         from hullforge_mcp import server as server_mod
-        monkeypatch.setenv(gateway.MODE_ENV, "gateway")
         monkeypatch.setattr(server_mod, "discover_all", lambda _dir=None: [])
         srv = HullForgeServer(tmp_path)
         listed = [t.name for t in (await srv._handle_list_tools(None, None)).tools]
@@ -120,21 +116,6 @@ class TestFixedList:
         assert by["hf_read"].annotations.read_only_hint is True
         assert by["hf_destroy"].annotations.destructive_hint is True
         assert by["hf_write"].annotations.destructive_hint is False
-
-    async def test_off_by_default(self, editor, tmp_path, monkeypatch):
-        monkeypatch.delenv(gateway.MODE_ENV, raising=False)
-        from hullforge_mcp import server as server_mod
-        from hullforge_mcp.session import SessionInfo
-        info = SessionInfo(port=editor.port, token=editor.token, pid=0)
-        monkeypatch.setattr(server_mod, "discover_all", lambda _dir=None: [info])
-        editor.tool("hf_describe_tools")(lambda msg: _reply(msg, {"tools": TOOLS, "count": len(TOOLS)}))
-        srv = HullForgeServer(tmp_path)
-        try:
-            listed = {t.name for t in (await srv._handle_list_tools(None, None)).tools}
-            assert "hf_describe_actor" in listed and "hf_read" not in listed
-        finally:
-            if srv._client is not None:
-                await srv._client.close()
 
 
 class TestSearch:
@@ -231,27 +212,3 @@ class TestCalls:
         srv, editor = gw
         r = await call(srv, "hf_delete_actor", {"actor": "Rock", "confirm": True})
         assert r.is_error and not sent(editor, "hf_delete_actor")
-
-
-class TestModeVariable:
-    """HULLFORGE_TOOL_MODE takes gateway, full, or a preset name, so the
-    desktop extension's settings need one field."""
-
-    @pytest.fixture(autouse=True)
-    def clean(self, monkeypatch):
-        for v in (gateway.MODE_ENV, "HULLFORGE_CATALOG_MODE", "HULLFORGE_CATALOG_AREAS", "HULLFORGE_TOOL_PRESET"):
-            monkeypatch.delenv(v, raising=False)
-
-    def test_preset_name_turns_catalog_mode_on(self, monkeypatch):
-        from hullforge_mcp import presets
-        from hullforge_mcp.server import _catalog_mode_override, _preloaded_areas
-        monkeypatch.setenv(gateway.MODE_ENV, "general")
-        assert _catalog_mode_override() is True
-        assert _preloaded_areas() == set(presets.PRESETS["general"].areas)
-
-    def test_full_and_gateway_are_not_presets(self, monkeypatch):
-        from hullforge_mcp.server import _catalog_mode_override, _preloaded_areas
-        for mode in ("full", "gateway", ""):
-            monkeypatch.setenv(gateway.MODE_ENV, mode)
-            assert _catalog_mode_override() is None
-            assert _preloaded_areas() is None

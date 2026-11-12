@@ -52,26 +52,11 @@ async def wired(editor, tmp_path, monkeypatch):
             await srv._client.close()
 
 
-def catalog_names(result) -> list[str]:
-    """Tool names excluding the ones the sidecar synthesises.
-
-    hf_bridge_status and hf_list_tool_areas are always present and are not the
-    editor's, so including them would make every catalog assertion about
-    plumbing rather than about what the editor actually advertises.
-    """
-    from hullforge_mcp.server import (
-        _BRIDGE_STATUS_TOOL,
-        _DISABLE_AREAS_TOOL,
-        _ENABLE_AREAS_TOOL,
-        _LIST_AREAS_TOOL,
-    )
-    synthetic = {
-        _BRIDGE_STATUS_TOOL.name,
-        _LIST_AREAS_TOOL.name,
-        _ENABLE_AREAS_TOOL.name,
-        _DISABLE_AREAS_TOOL.name,
-    }
-    return [t.name for t in result.tools if t.name not in synthetic]
+def catalog_names(tools) -> list[str]:
+    """Names of the editor's tools as the connector translated them. They are
+    never listed (the gateway is), but search, validation and dispatch all
+    work from this catalog."""
+    return [t.name for t in tools]
 
 
 class TestCatalog:
@@ -87,10 +72,10 @@ class TestCatalog:
                  "mutating": True, "input_schema": SCHEMA},
             ])
 
-        result = await srv._handle_list_tools(None, None)
+        result = await srv._refresh_catalog()
         assert catalog_names(result) == ["hf_ping", "hf_create_material"]
 
-        mat = next(t for t in result.tools if t.name == "hf_create_material")
+        mat = next(t for t in result if t.name == "hf_create_material")
         assert mat.description == "make a material"
         # Schema must arrive verbatim from C++, not be re-derived here.
         assert mat.input_schema == SCHEMA
@@ -107,7 +92,7 @@ class TestCatalog:
                  "input_schema": {"type": "object"}},
             ])
 
-        tools = {t.name: t for t in (await srv._handle_list_tools(None, None)).tools}
+        tools = {t.name: t for t in await srv._refresh_catalog()}
         assert tools["reader"].annotations.read_only_hint is True
         assert tools["writer"].annotations.read_only_hint is False
 
@@ -135,7 +120,7 @@ class TestCatalog:
                  "mutating": False, "input_schema": {"type": "object"}},
             ])
 
-        tools = {t.name: t for t in (await srv._handle_list_tools(None, None)).tools}
+        tools = {t.name: t for t in await srv._refresh_catalog()}
         assert all(t.title for t in tools.values()), "every tool needs a title"
         assert tools["hf_set_material_parameter"].title == "Set Material Parameter"
         # Acronyms must not be naively capitalised into "Pcg".
@@ -153,7 +138,7 @@ class TestCatalog:
                  "mutating": True, "input_schema": {"type": "object"}},
             ])
 
-        tools = {t.name: t for t in (await srv._handle_list_tools(None, None)).tools}
+        tools = {t.name: t for t in await srv._refresh_catalog()}
         assert tools["hf_delete_asset"].annotations.destructive_hint is True
         assert tools["hf_create_material_instance"].annotations.destructive_hint is False
 
@@ -181,7 +166,7 @@ class TestCatalog:
                  "input_schema": {"type": "object"}},
             ])
 
-        tools = {t.name: t for t in (await srv._handle_list_tools(None, None)).tools}
+        tools = {t.name: t for t in await srv._refresh_catalog()}
         assert tools["hf_fix_redirectors"].annotations.destructive_hint is True
         assert tools["hf_fix_redirectors"].annotations.read_only_hint is False
         assert tools["hf_find_redirectors"].annotations.read_only_hint is True
@@ -200,7 +185,7 @@ class TestCatalog:
                  "mutating": False, "input_schema": {"type": "object"}},
             ])
 
-        assert catalog_names(await srv._handle_list_tools(None, None)) == ["hf_ping"]
+        assert catalog_names(await srv._refresh_catalog()) == ["hf_ping"]
 
     async def test_tool_without_schema_is_dropped_not_shipped_untyped(self, wired):
         # An untyped tool forces the model to guess parameters. Better absent.
@@ -215,9 +200,10 @@ class TestCatalog:
                  "input_schema": {"type": "object"}},
             ])
 
-        assert catalog_names(await srv._handle_list_tools(None, None)) == ["fine"]
+        assert catalog_names(await srv._refresh_catalog()) == ["fine"]
 
-    async def test_unreachable_editor_yields_empty_catalog_not_a_crash(self, tmp_path, monkeypatch):
+    async def test_list_is_the_gateway_even_with_no_editor(self, tmp_path, monkeypatch):
+        from hullforge_mcp import gateway
         from hullforge_mcp import server as server_mod
         from hullforge_mcp.session import SessionError
 
@@ -227,10 +213,9 @@ class TestCatalog:
         monkeypatch.setattr(server_mod, "discover_all", boom)
         srv = HullForgeServer(tmp_path)
         result = await srv._handle_list_tools(None, None)
-        # Only the always-available status tool, which EXPLAINS the absence
-        # rather than leaving an empty list that looks like a broken install.
-        assert catalog_names(result) == []
-        assert any(t.name == "hf_bridge_status" for t in result.tools)
+        # The status tool EXPLAINS an absent editor, and the gateway is there
+        # from the start, so a client that reads the list once never misses it.
+        assert [t.name for t in result.tools] == ["hf_bridge_status", *gateway.NAMES]
 
     async def test_catalog_is_not_cached_across_calls(self, wired):
         # HullForge.Reload can change the catalog at any moment, so a stale
@@ -243,10 +228,10 @@ class TestCatalog:
         def _(msg):
             return describe_reply(msg, state["tools"])
 
-        assert catalog_names(await srv._handle_list_tools(None, None)) == ["a"]
+        assert catalog_names(await srv._refresh_catalog()) == ["a"]
         state["tools"].append({"name": "b", "description": "", "mutating": False,
                                "input_schema": {"type": "object"}})
-        assert catalog_names(await srv._handle_list_tools(None, None)) == ["a", "b"]
+        assert catalog_names(await srv._refresh_catalog()) == ["a", "b"]
 
 
 class Params:
@@ -264,7 +249,7 @@ class TestCallTool:
             return {"id": msg["id"], "ok": True, "status": "ok",
                     "result": {"server": "hullforge", "tool_count": 3}}
 
-        result = await srv._handle_call_tool(None, Params("hf_ping"))
+        result = await srv._dispatch("hf_ping", {})
         assert result.is_error in (False, None)
         assert result.structured_content == {"server": "hullforge", "tool_count": 3}
         assert json.loads(result.content[0].text)["tool_count"] == 3
@@ -277,7 +262,7 @@ class TestCallTool:
             return {"id": msg["id"], "ok": True, "status": "ok",
                     "result": {"got": msg["args"]}}
 
-        result = await srv._handle_call_tool(None, Params("t", {"asset_path": "/Game/X"}))
+        result = await srv._dispatch("t", {"asset_path": "/Game/X"})
         assert result.structured_content["got"] == {"asset_path": "/Game/X"}
 
     async def test_tool_failure_is_an_mcp_error_result(self, wired):
@@ -288,7 +273,7 @@ class TestCallTool:
             return {"id": msg["id"], "ok": False, "status": "failed",
                     "error": "asset not found"}
 
-        result = await srv._handle_call_tool(None, Params("boom"))
+        result = await srv._dispatch("boom", {})
         assert result.is_error is True
         assert "asset not found" in result.content[0].text
 
@@ -302,7 +287,7 @@ class TestCallTool:
             return {"id": msg["id"], "ok": False, "status": "unknown",
                     "error": "Timed out after 120s."}
 
-        result = await srv._handle_call_tool(None, Params("slow"))
+        result = await srv._dispatch("slow", {})
         text = result.content[0].text
         assert result.is_error is True
         assert "OUTCOME UNKNOWN" in text
@@ -320,8 +305,8 @@ class TestCallTool:
         def _(msg):
             return {"id": msg["id"], "ok": False, "status": "unknown", "error": "x"}
 
-        failed = (await srv._handle_call_tool(None, Params("f"))).content[0].text
-        unknown = (await srv._handle_call_tool(None, Params("u"))).content[0].text
+        failed = (await srv._dispatch("f", {})).content[0].text
+        unknown = (await srv._dispatch("u", {})).content[0].text
         assert failed != unknown
         assert "OUTCOME UNKNOWN" not in failed
 
@@ -334,7 +319,7 @@ class TestCallTool:
         monkeypatch.setattr(server_mod, "discover_all", lambda _d=None: [])
 
         srv = HullForgeServer(tmp_path)
-        result = await srv._handle_call_tool(None, Params("hf_ping"))
+        result = await srv._dispatch("hf_ping", {})
         assert result.is_error is True
 
         message = result.content[0].text
@@ -346,7 +331,7 @@ class TestCallTool:
         srv, editor = wired
         editor.raw_override = b"\xff\xff\xff\x7f"  # framing fault
 
-        result = await srv._handle_call_tool(None, Params("t"))
+        result = await srv._dispatch("t", {})
         assert result.is_error is True
         assert srv._client is None  # forces rediscovery next call
 
@@ -378,7 +363,7 @@ class TestImageContent:
 
     async def test_emits_an_image_block(self, wired, shot):
         srv, _ = wired
-        result = await srv._handle_call_tool(None, Params("hf_screenshot"))
+        result = await srv._dispatch("hf_screenshot", {})
         images = [c for c in result.content if getattr(c, "type", None) == "image"]
         assert len(images) == 1
         assert images[0].data == self.PNG_B64
@@ -386,7 +371,7 @@ class TestImageContent:
 
     async def test_metadata_travels_as_text_without_the_bytes(self, wired, shot):
         srv, _ = wired
-        result = await srv._handle_call_tool(None, Params("hf_screenshot"))
+        result = await srv._dispatch("hf_screenshot", {})
         texts = [c for c in result.content if getattr(c, "type", None) == "text"]
         assert len(texts) == 1
         meta = json.loads(texts[0].text)
@@ -399,7 +384,7 @@ class TestImageContent:
         # when structured_content is present - which would lose the picture and
         # leave a megabyte of base64 behind.
         srv, _ = wired
-        result = await srv._handle_call_tool(None, Params("hf_screenshot"))
+        result = await srv._dispatch("hf_screenshot", {})
         assert "image_base64" not in result.structured_content
         assert result.structured_content["width"] == 1
 
@@ -410,7 +395,7 @@ class TestImageContent:
         def _(msg):
             return {"id": msg["id"], "ok": True, "status": "ok", "result": {"a": 1}}
 
-        result = await srv._handle_call_tool(None, Params("plain"))
+        result = await srv._dispatch("plain", {})
         assert all(getattr(c, "type", None) == "text" for c in result.content)
         assert result.structured_content == {"a": 1}
 
@@ -422,7 +407,7 @@ class TestImageContent:
             return {"id": msg["id"], "ok": True, "status": "ok",
                     "result": {"image_base64": "", "width": 0}}
 
-        result = await srv._handle_call_tool(None, Params("empty_shot"))
+        result = await srv._dispatch("empty_shot", {})
         assert all(getattr(c, "type", None) == "text" for c in result.content)
 
 
@@ -442,7 +427,7 @@ class TestIdempotency:
                  "input_schema": {"type": "object"}},
             ]}}
 
-        await srv._handle_list_tools(None, None)   # populates _mutating
+        await srv._refresh_catalog()   # populates _mutating
         return srv, editor
 
     async def test_mutating_calls_carry_an_operation_id(self, mutating):
@@ -452,7 +437,7 @@ class TestIdempotency:
         def _(msg):
             return {"id": msg["id"], "ok": True, "status": "ok", "result": {}}
 
-        await srv._handle_call_tool(None, Params("writer"))
+        await srv._dispatch("writer", {})
         sent = [m for m in editor.received if m.get("tool") == "writer"]
         assert len(sent) == 1
         assert sent[0].get("operation_id")
@@ -465,7 +450,7 @@ class TestIdempotency:
         def _(msg):
             return {"id": msg["id"], "ok": True, "status": "ok", "result": {}}
 
-        await srv._handle_call_tool(None, Params("reader"))
+        await srv._dispatch("reader", {})
         sent = [m for m in editor.received if m.get("tool") == "reader"]
         assert "operation_id" not in sent[0]
 
@@ -482,7 +467,7 @@ class TestIdempotency:
                 raise ConnectionResetError  # drops the connection mid-call
             return {"id": msg["id"], "ok": True, "status": "ok", "result": {"n": state["n"]}}
 
-        result = await srv._handle_call_tool(None, Params("writer"))
+        result = await srv._dispatch("writer", {})
         assert result.is_error in (False, None)
 
         ids = [m["operation_id"] for m in editor.received if m.get("tool") == "writer"]
@@ -497,7 +482,7 @@ class TestIdempotency:
             return {"id": msg["id"], "ok": True, "status": "ok",
                     "result": {"done": True}, "deduplicated": True}
 
-        result = await srv._handle_call_tool(None, Params("writer"))
+        result = await srv._dispatch("writer", {})
         assert result.structured_content["deduplicated"] is True
         assert "replayed" in result.content[0].text
 
@@ -508,7 +493,7 @@ class TestIdempotency:
         def _(msg):
             return {"id": msg["id"], "ok": True, "status": "ok", "result": {"done": True}}
 
-        result = await srv._handle_call_tool(None, Params("writer"))
+        result = await srv._dispatch("writer", {})
         assert "deduplicated" not in result.structured_content
         assert "replayed" not in result.content[0].text
 
@@ -516,7 +501,7 @@ class TestIdempotency:
         srv, editor = mutating
         editor.raw_override = b"\xff\xff\xff\x7f"  # permanent framing fault
 
-        result = await srv._handle_call_tool(None, Params("writer"))
+        result = await srv._dispatch("writer", {})
         assert result.is_error is True
         assert "Bridge error" in result.content[0].text
 
@@ -528,7 +513,7 @@ class TestIdempotency:
         def _(msg):
             return {"id": msg["id"], "ok": False, "status": "failed", "error": "nope"}
 
-        result = await srv._handle_call_tool(None, Params("writer"))
+        result = await srv._dispatch("writer", {})
         assert result.is_error is True
         assert len([m for m in editor.received if m.get("tool") == "writer"]) == 1
 
@@ -541,7 +526,7 @@ class TestIdempotency:
         def _(msg):
             return {"id": msg["id"], "ok": False, "status": "unknown", "error": "timed out"}
 
-        result = await srv._handle_call_tool(None, Params("writer"))
+        result = await srv._dispatch("writer", {})
         assert result.is_error is True
         assert "OUTCOME UNKNOWN" in result.content[0].text
         assert len([m for m in editor.received if m.get("tool") == "writer"]) == 1
