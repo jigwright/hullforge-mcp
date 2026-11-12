@@ -22,6 +22,7 @@ import mcp.types as types
 from mcp.server.lowlevel import NotificationOptions, Server
 
 from .client import BridgeClient, BridgeError, ToolFailed, ToolOutcomeUnknown
+from . import presets as _presets
 from .session import (
     SessionError,
     SessionInfo,
@@ -214,8 +215,19 @@ def _preloaded_areas() -> set[str] | None:
     """
     if _CATALOG_AREAS_ENV not in os.environ:
         return None
+    areas, unknown = _presets.expand(_preloaded_tokens())
+    if unknown:
+        log.warning(
+            "%s names unknown preset(s) %s; they add nothing. Known presets: %s",
+            _CATALOG_AREAS_ENV, ", ".join(unknown),
+            ", ".join(_presets.PRESET_PREFIX + n for n in _presets.PRESETS))
+    return areas
+
+
+def _preloaded_tokens() -> list[str]:
+    """The variable's comma-separated entries: area names and @presets."""
     raw = os.environ.get(_CATALOG_AREAS_ENV, "")
-    return {part.strip() for part in raw.split(",") if part.strip()}
+    return [part.strip() for part in raw.split(",") if part.strip()]
 
 # Always present, even with no editor running. Without this, "no editor" shows
 # up as an empty tool list, which is silent and baffling - the user has no way
@@ -559,13 +571,40 @@ class HullForgeServer:
             for area, count in sorted(self._area_counts.items())
         ]
 
+        known = set(self._area_counts)
+        preset_rows = [
+            {
+                "name": _presets.PRESET_PREFIX + p.name,
+                "summary": p.summary,
+                "areas": list(p.areas),
+                "tool_count": sum(self._area_counts.get(a, 0) for a in set(p.areas) | set(_ALWAYS_ON_AREAS)),
+            }
+            for p in _presets.PRESETS.values()
+        ]
         payload: dict[str, Any] = {
             "catalog_mode": enabled,
             "areas": areas,
             "area_count": len(areas),
             "tools_total": total,
             "tools_listed": listed,
+            "presets": preset_rows,
         }
+        # Problems a person can act on, said where they will look. A preset or
+        # an area that matches nothing would otherwise just list fewer tools.
+        problems: list[str] = []
+        if known and _CATALOG_AREAS_ENV in os.environ:
+            _, bad_presets = _presets.expand(_preloaded_tokens())
+            bad_areas = [t for t in _preloaded_tokens()
+                         if not _presets.is_preset(t) and t not in known]
+            if bad_presets:
+                problems.append(f"{_CATALOG_AREAS_ENV} names unknown preset(s): {', '.join(bad_presets)}.")
+            if bad_areas:
+                problems.append(f"{_CATALOG_AREAS_ENV} names area(s) this editor does not have: {', '.join(bad_areas)}.")
+        if known:
+            for name, missing in _presets.unknown_areas(known).items():
+                problems.append(f"Preset @{name} lists area(s) this editor does not have: {', '.join(missing)}.")
+        if problems:
+            payload["problems"] = problems
 
         if enabled:
             payload["how_to_use"] = (
@@ -593,6 +632,13 @@ class HullForgeServer:
             mark = "on " if area["listed"] else "off"
             suffix = " (always on)" if area["always_on"] else ""
             lines.append(f"  [{mark}] {area['name']:<18} {area['tool_count']:>3}{suffix}")
+
+        lines.append("")
+        lines.append(f"Presets, for {_CATALOG_AREAS_ENV} (e.g. {_CATALOG_AREAS_ENV}=@level):")
+        for row in preset_rows:
+            lines.append(f"  {row['name']:<12} {row['tool_count']:>4} tools  {row['summary']}")
+        for problem in problems:
+            lines.append(f"WARNING: {problem}")
 
         if not enabled:
             lines.append("")

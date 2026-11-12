@@ -71,7 +71,28 @@ plus whatever areas have been switched on:
 ```
 HULLFORGE_CATALOG_MODE=1                    turn it on
 HULLFORGE_CATALOG_AREAS=Materials,Sequencer start with those already listed
+HULLFORGE_CATALOG_AREAS=@level              or a preset, for a kind of work
+HULLFORGE_CATALOG_AREAS=@materials,Audio    presets and areas mix
 ```
+
+Presets (Core and Changes are always added; tool counts from UE 5.8):
+
+| Preset | Tools | For |
+| --- | ---: | --- |
+| `@general` | 410 | Everyday editing: actors, assets, Blueprints, materials, lights |
+| `@level` | 646 | Levels: landscape, foliage, meshes, splines, world partition |
+| `@materials` | 367 | Materials, material instances, textures |
+| `@blueprints` | 392 | Blueprint classes, components, input, game framework |
+| `@gameplay` | 458 | GAS, gameplay tags, AI, StateTree, navigation |
+| `@animation` | 591 | Animation, Control Rig, IK rigs, retargeting |
+| `@cinematics` | 528 | Sequencer, cameras, movie rendering |
+| `@vfx` | 377 | Niagara and its materials |
+| `@audio` | 254 | Sound assets, MetaSounds |
+| `@ui` | 352 | UMG, view models |
+| `@pcg` | 499 | PCG graphs, splines, foliage, landscape |
+
+`hf_list_tool_areas` lists the presets with live counts, and warns about a preset
+or area name that matches nothing, instead of quietly listing fewer tools.
 
 `hf_list_tool_areas` shows every area with its tool count and whether it is
 listed. `hf_enable_tool_areas` and `hf_disable_tool_areas` change the set, and
@@ -86,6 +107,17 @@ rather than assumed. `hf_list_tool_areas` is listed either way, so the mode is
 discoverable without being imposed. A tool from an area that is not listed is
 refused rather than quietly run, for the same reason: a hidden tool that works
 anyway would make the list advice.
+
+**In Claude Code, preset the areas.** Switching areas on mid-session depends on
+the client re-reading the tool list after `tools/list_changed`, and Claude Code
+never does, so areas enabled that way never become callable there. Areas named in
+`HULLFORGE_CATALOG_AREAS` are listed from startup, which Claude Code does see, so
+pick a preset for the work (`@general` if unsure).
+Measured with [hullforge-evals](https://github.com/jigwright/hullforge-evals) on
+20 tasks: `@general` (the same seven areas) passed the same 39 of 40 runs as the
+full list, with 88k tokens of context per run instead of 265k, and $2.60 total
+instead of $8.34 (API-equivalent). With no preset, leave catalog mode off in
+Claude Code; its tool search handles the full list.
 
 ## Reliability
 
