@@ -247,10 +247,19 @@ def _gateway_mode() -> bool:
     return os.environ.get(_gateway.MODE_ENV, "").strip().lower() == "gateway"
 
 
+def _mode_as_preset() -> str:
+    """HULLFORGE_TOOL_MODE naming a preset ("general", "@level") instead of
+    gateway or full, so a settings form needs one field for all three choices."""
+    raw = os.environ.get(_gateway.MODE_ENV, "").strip()
+    if raw.lower() in ("", "gateway", "full"):
+        return ""
+    return raw
+
+
 def _tool_preset_tokens() -> list[str]:
     """HULLFORGE_TOOL_PRESET's entries. A bare preset name gets its "@", so a
     settings field can take "general" as well as "@general"."""
-    raw = os.environ.get(_TOOL_PRESET_ENV, "")
+    raw = os.environ.get(_TOOL_PRESET_ENV, "") or _mode_as_preset()
     tokens = [part.strip() for part in raw.split(",") if part.strip()]
     return [_presets.PRESET_PREFIX + t if not _presets.is_preset(t) and t.lower() in _presets.PRESETS else t
             for t in tokens]

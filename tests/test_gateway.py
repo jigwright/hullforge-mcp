@@ -231,3 +231,27 @@ class TestCalls:
         srv, editor = gw
         r = await call(srv, "hf_delete_actor", {"actor": "Rock", "confirm": True})
         assert r.is_error and not sent(editor, "hf_delete_actor")
+
+
+class TestModeVariable:
+    """HULLFORGE_TOOL_MODE takes gateway, full, or a preset name, so the
+    desktop extension's settings need one field."""
+
+    @pytest.fixture(autouse=True)
+    def clean(self, monkeypatch):
+        for v in (gateway.MODE_ENV, "HULLFORGE_CATALOG_MODE", "HULLFORGE_CATALOG_AREAS", "HULLFORGE_TOOL_PRESET"):
+            monkeypatch.delenv(v, raising=False)
+
+    def test_preset_name_turns_catalog_mode_on(self, monkeypatch):
+        from hullforge_mcp import presets
+        from hullforge_mcp.server import _catalog_mode_override, _preloaded_areas
+        monkeypatch.setenv(gateway.MODE_ENV, "general")
+        assert _catalog_mode_override() is True
+        assert _preloaded_areas() == set(presets.PRESETS["general"].areas)
+
+    def test_full_and_gateway_are_not_presets(self, monkeypatch):
+        from hullforge_mcp.server import _catalog_mode_override, _preloaded_areas
+        for mode in ("full", "gateway", ""):
+            monkeypatch.setenv(gateway.MODE_ENV, mode)
+            assert _catalog_mode_override() is None
+            assert _preloaded_areas() is None

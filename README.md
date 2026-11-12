@@ -75,7 +75,9 @@ fixed tools instead, whatever the editor holds and whether or not it is open:
 | `hf_destroy` | Calls a destructive tool; refused unless `confirm` is true |
 
 ```
-HULLFORGE_TOOL_MODE=gateway
+HULLFORGE_TOOL_MODE=gateway      five fixed tools (recommended)
+HULLFORGE_TOOL_MODE=full         every tool listed, the default
+HULLFORGE_TOOL_MODE=general      a preset (see Catalog mode)
 ```
 
 Every call is checked against the tool's real schema before it reaches the
