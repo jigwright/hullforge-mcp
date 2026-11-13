@@ -17,6 +17,8 @@ classifiers = [
 dependencies = [
     "mcp>=2.0.0",
     "jsonschema>=4.20",
+    "fastembed>=0.9.1",
+    "numpy>=2.5.4",
 ]
 
 [project.urls]

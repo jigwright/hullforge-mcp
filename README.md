@@ -95,6 +95,25 @@ seven-area preset that came before this design:
 | Startup context | 87k tokens | 28k | **21k** |
 | Cold cost per task, core | $0.35 | $0.10 | **$0.06** |
 
+### Looking up the engine API
+
+A sixth fixed tool, `hf_api_lookup`, answers "which Unreal function or class does
+this?" with no editor open: Blueprint-callable functions with their doc comments,
+asset factories, subsystems, settings classes and HullForge's engine API notes.
+Filter by `kind` or `editor_only`.
+
+On first use the connector scans the headers of your own Unreal install (the
+newest engine in the Epic launcher's install list, or `HULLFORGE_ENGINE` to pick
+one) and caches the index under `%LOCALAPPDATA%\HullForge\mcp\api_index`. No
+Epic code or text ships with the connector. The scan takes about 20 seconds; the
+search embeddings (`bge-small-en-v1.5`, run locally) take a few minutes once.
+Until they're ready, lookups use keyword search alone.
+
+Search combines keywords, with Unreal synonyms, and the embeddings. On 30
+questions written before tuning, the right entry was first 40% of the time and in
+the top five 50%; see
+[finding 11](https://github.com/jigwright/hullforge-evals/blob/main/FINDINGS.md).
+
 ## Reliability
 
 Two things in here exist because the alternative loses work.

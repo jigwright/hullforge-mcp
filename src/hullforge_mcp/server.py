@@ -13,6 +13,7 @@ every schema on this side and inventing exactly the drift we are avoiding.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -22,6 +23,7 @@ import mcp.types as types
 from mcp.server.lowlevel import NotificationOptions, Server
 
 from .client import BridgeClient, BridgeError, ToolFailed, ToolOutcomeUnknown
+from . import api_index as _api_index
 from . import gateway as _gateway
 from .session import (
     SessionError,
@@ -143,6 +145,9 @@ class HullForgeServer:
         # The gateway's view of the editor's catalog: searched, validated
         # against, never listed. See gateway.py.
         self._index = _gateway.Index()
+        # The engine API lookup. Built from the installed engine on first use,
+        # in a thread, so it never blocks the editor tools.
+        self._api = _api_index.LazyApiIndex()
         self.server: Server = Server(
             "hullforge",
             version="0.1.0",
@@ -275,6 +280,9 @@ class HullForgeServer:
         if name == _BRIDGE_STATUS_TOOL.name:
             return self._bridge_status()
 
+        if name == _gateway.LOOKUP:
+            return await self._api_lookup(args)
+
         if name in _gateway.NAMES:
             return await self._gateway_call(name, args)
 
@@ -352,6 +360,54 @@ class HullForgeServer:
 
         # Unreachable in practice; the loop returns on every path.
         return _error(f"Bridge error calling '{name}': {last_error}")
+
+    # -- engine API lookup --------------------------------------------------
+
+    async def _api_lookup(self, args: dict[str, Any]) -> types.CallToolResult:
+        query = str(args.get("query") or "").strip()
+        if not query:
+            return _error("'query' is required: describe what you want to know, or give a class or function name.")
+        limit = max(1, min(int(args.get("limit") or 6), 20))
+        kind = args.get("kind") or None
+        editor_only = bool(args.get("editor_only"))
+        self._api.ensure_started()
+        if self._api.index is None:
+            # First use: reading the engine headers takes about twenty seconds.
+            await asyncio.to_thread(self._api.wait, 45)
+        index = self._api.index
+        if index is None:
+            why = self._api.error or "still reading the engine headers; try again in a few seconds"
+            if not self._api.error and not _api_index.find_engines():
+                why = "no Unreal Engine install was found in the Epic launcher's list"
+            return _error(f"The API index is not ready: {why}.")
+        hits = await asyncio.to_thread(index.search, query, limit=limit, kind=kind, editor_only=editor_only)
+        status = index.status
+        method = "hybrid (keywords + embeddings)" if status.embeddings == "ready" else (
+            f"keywords only; embeddings {status.embeddings}")
+        rows = []
+        lines = [f"{len(hits)} results for '{query}' from UE {status.engine or '?'} "
+                 f"({status.records} entries, {method})."]
+        for _, r in hits:
+            row = {"kind": r.kind, "name": r.name, "module": r.module, "path": r.path,
+                   "signature": r.signature, "category": r.category, "editor": r.editor,
+                   "text": r.text[:700]}
+            rows.append(row)
+            head = f"- [{r.kind}] {r.name}"
+            if r.module:
+                head += f"  ({r.module}{', editor' if r.editor else ''})"
+            lines.append(head)
+            if r.signature:
+                lines.append(f"    {r.signature}")
+            if r.text:
+                lines.append(f"    {r.text[:400]}" + ("..." if len(r.text) > 400 else ""))
+            if r.path:
+                lines.append(f"    {r.path}")
+        if not hits:
+            lines.append("Nothing matched. Try other words or a class name.")
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text="\n".join(lines))],
+            structured_content={"engine": status.engine, "method": method, "results": rows},
+        )
 
     # -- gateway ------------------------------------------------------------
 

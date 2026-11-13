@@ -12,6 +12,7 @@ import mcp.types as types
 import pytest
 
 from hullforge_mcp.server import HullForgeServer
+from hullforge_mcp import gateway
 
 pytestmark = pytest.mark.anyio
 
@@ -215,7 +216,7 @@ class TestCatalog:
         result = await srv._handle_list_tools(None, None)
         # The status tool EXPLAINS an absent editor, and the gateway is there
         # from the start, so a client that reads the list once never misses it.
-        assert [t.name for t in result.tools] == ["hf_bridge_status", *gateway.NAMES]
+        assert [t.name for t in result.tools] == ["hf_bridge_status", *gateway.NAMES, gateway.LOOKUP]
 
     async def test_catalog_is_not_cached_across_calls(self, wired):
         # HullForge.Reload can change the catalog at any moment, so a stale
@@ -530,3 +531,39 @@ class TestIdempotency:
         assert result.is_error is True
         assert "OUTCOME UNKNOWN" in result.content[0].text
         assert len([m for m in editor.received if m.get("tool") == "writer"]) == 1
+
+
+class TestApiLookup:
+    """The lookup is answered without an editor and without touching the bridge."""
+
+    def _server_with_index(self, records):
+        from hullforge_mcp import api_index
+        srv = HullForgeServer()
+        idx = api_index.ApiIndex(records)
+        idx.status.engine = "5.8"
+        srv._api.index = idx
+        srv._api._thread = object()  # mark as started so nothing is scanned
+        return srv
+
+    def _call(self, srv, args):
+        import asyncio
+        params = types.CallToolRequestParams(name=gateway.LOOKUP, arguments=args)
+        return asyncio.run(srv._handle_call_tool(None, params))
+
+    def test_returns_matches_with_signature_and_path(self):
+        from hullforge_mcp.api_index import Record
+        srv = self._server_with_index([
+            Record(id="f1", kind="function", name="UEditorAssetLibrary.DuplicateAsset",
+                   text="Duplicate an asset.", signature="static UObject* DuplicateAsset(const FString& Src, const FString& Dst)",
+                   module="EditorScriptingUtilities", path="Engine/Plugins/x.h", editor=True),
+            Record(id="f2", kind="function", name="UGameplayStatics.PlaySound2D", text="Plays a sound.", module="Engine"),
+        ])
+        result = self._call(srv, {"query": "duplicate asset", "limit": 1})
+        assert not result.is_error
+        assert result.structured_content["results"][0]["name"] == "UEditorAssetLibrary.DuplicateAsset"
+        assert "DuplicateAsset(const FString& Src" in result.content[0].text
+        assert "keywords only" in result.structured_content["method"]
+
+    def test_requires_a_query(self):
+        srv = self._server_with_index([])
+        assert self._call(srv, {}).is_error

@@ -1,4 +1,4 @@
-"""The gateway: five fixed tools in front of the whole editor.
+"""The gateway: five fixed tools in front of the whole editor, plus an API lookup.
 
 The editor offers about 3,000 tools. Listing them all costs a client tens of
 thousands of tokens before any work starts, and changing the list mid-session
@@ -40,6 +40,9 @@ READ = "hf_read"
 WRITE = "hf_write"
 DESTROY = "hf_destroy"
 NAMES = (SEARCH, SCHEMA, READ, WRITE, DESTROY)
+# Looks up the Unreal Engine API itself, not the editor's tools. Needs no
+# editor, so it is dispatched apart from NAMES. See api_index.py.
+LOOKUP = "hf_api_lookup"
 
 # Claude Code loads these tools' schemas up front rather than behind its own
 # tool search. Five small schemas are cheaper than a search round-trip to find
@@ -63,6 +66,9 @@ INSTRUCTIONS = (
     "Search, then fetch the schema, then call. Never guess arguments: a call "
     "with wrong arguments is refused and the schema is returned. "
     "Every write is verified by reading it back; trust the result it reports. "
+    "To learn how the engine does something (which class or function, which module, "
+    "known version traps), use hf_api_lookup; it reads the engine installed on this "
+    "machine. "
     "If a call reports that the outcome is UNKNOWN, check current state before "
     "retrying. If calls say no editor is connected, the user needs to open "
     "their Unreal project; hf_bridge_status reports what is found."
@@ -422,6 +428,33 @@ TOOLS: list[types.Tool] = [
             ("confirm",),
         ),
         annotations=types.ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=True),
+        meta=_ALWAYS_LOAD,
+    ),
+    types.Tool(
+        name=LOOKUP,
+        title="Unreal API Lookup",
+        description=(
+            "Search the Unreal Engine API on this machine: every Blueprint-callable "
+            "function with its doc comment, class, signature and module, plus asset "
+            "factories, subsystems, settings pages and HullForge's verified notes on "
+            "engine version traps. Ask in plain words (\"make a texture from a render "
+            "target\") or by name. Use it to understand the engine; to change the "
+            "project, use hf_search_tools. Works without an editor open."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What you want to know or do, in plain words, or an engine class or function name."},
+                "kind": {"type": "string", "enum": ["function", "factory", "subsystem", "settings", "note"],
+                         "description": "Optional. Only one kind of result."},
+                "editor_only": {"type": "boolean", "default": False,
+                                "description": "Optional. Only functions from editor modules."},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 6},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+        annotations=types.ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True),
         meta=_ALWAYS_LOAD,
     ),
 ]
