@@ -81,7 +81,7 @@ Every call is checked against the tool's real schema before it reaches the
 editor, and a refusal returns the schema. A destructive tool sent through
 `hf_write`, or a write sent through `hf_read`, is refused rather than rerouted,
 so permission rules on the three callers keep their meaning. Calling an editor
-tool directly by name is refused too. The five tools carry
+tool directly by name is refused too. All of the connector's tools carry
 `anthropic/alwaysLoad`, so Claude Code loads them without a search step.
 
 Measured with [hullforge-evals](https://github.com/jigwright/hullforge-evals)
@@ -103,10 +103,11 @@ asset factories, subsystems, settings classes and HullForge's engine API notes.
 Filter by `kind` or `editor_only`.
 
 On first use the connector scans the headers of your own Unreal install (the
-newest engine in the Epic launcher's install list, or `HULLFORGE_ENGINE` to pick
-one) and caches the index under `%LOCALAPPDATA%\HullForge\mcp\api_index`. No
+newest engine in the Epic launcher's install list) and caches the index under `%LOCALAPPDATA%\HullForge\mcp\api_index`. No
 Epic code or text ships with the connector. The scan takes about 20 seconds; the
-search embeddings (`bge-small-en-v1.5`, run locally) take a few minutes once.
+search embeddings take a few minutes once. The search model
+(`bge-small-en-v1.5`, MIT licensed) ships inside the connector and runs on the
+CPU, so nothing is downloaded.
 Until they're ready, lookups use keyword search alone.
 
 Search combines keywords, with Unreal synonyms, and the embeddings. On 30
@@ -134,6 +135,7 @@ Requires Python 3.13 and [uv](https://docs.astral.sh/uv/).
 
 ```
 uv sync
+uv run python scripts/vendor_embed_model.py   # once: the search model, 67 MB
 uv run pytest                       # unit tests, no editor needed
 uv run pytest -m integration        # needs a running editor with the plugin
 ```

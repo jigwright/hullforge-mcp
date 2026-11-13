@@ -21,3 +21,6 @@ build/
 # OS
 Thumbs.db
 .DS_Store
+
+# The search model, vendored by scripts/vendor_embed_model.py (66 MB; not in git)
+src/hullforge_mcp/data/embed_model/

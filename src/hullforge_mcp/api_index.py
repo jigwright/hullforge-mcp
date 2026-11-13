@@ -41,6 +41,12 @@ EXTRACTOR_VERSION = 1
 EMBED_TEXT_VERSION = 2
 EMBED_MODEL = "BAAI/bge-small-en-v1.5"
 RRF_K = 60
+# The search model ships inside the connector, so it never downloads anything:
+# the connector contacts no server. scripts/vendor_embed_model.py puts it here
+# for development and release builds; without it, lookup is keyword-only.
+EMBED_MODEL_DIR = Path(__file__).resolve().parent / "data" / "embed_model"
+EMBED_MODEL_FILES = ("model_optimized.onnx", "tokenizer.json", "config.json",
+                     "special_tokens_map.json", "tokenizer_config.json")
 LEXICAL_WEIGHT = 0.7  # keyword ranking counts a little less than the embedding ranking
 _NOTES_DIR = Path(__file__).parent / "data" / "engine_notes"
 
@@ -405,6 +411,12 @@ def _rerank(ids: list[int], prior: list[float]) -> list[int]:
 
 # -- the index --------------------------------------------------------------
 
+def bundled_model() -> Path | None:
+    """The search model's directory, if every file it needs is present."""
+    d = EMBED_MODEL_DIR
+    return d if all((d / f).is_file() for f in EMBED_MODEL_FILES) else None
+
+
 def cache_root() -> Path:
     base = os.environ.get("LOCALAPPDATA") or os.path.join(Path.home(), ".cache")
     return Path(base) / "HullForge" / "mcp" / "api_index"
@@ -444,6 +456,11 @@ class ApiIndex:
 
     def build_embeddings(self) -> None:
         """Compute or load the vectors. Safe to call from a background thread."""
+        model_dir = bundled_model()
+        if model_dir is None:
+            self.status.embeddings = ("unavailable: the search model is not bundled with this "
+                                      "build, so lookup uses keyword search only")
+            return
         self.status.embeddings = "building"
         try:
             import numpy as np
@@ -454,7 +471,10 @@ class ApiIndex:
         fp = self._fingerprint()
         path = self.cache_dir / f"vectors-{fp}.npy" if self.cache_dir else None
         try:
-            self._embedder = TextEmbedding(EMBED_MODEL)
+            # Never fall back to downloading: offline, from the bundled files only.
+            os.environ.setdefault("HF_HUB_OFFLINE", "1")
+            self._embedder = TextEmbedding(EMBED_MODEL, specific_model_path=str(model_dir),
+                                           local_files_only=True)
             if path and path.exists():
                 vectors = np.load(path)
             else:

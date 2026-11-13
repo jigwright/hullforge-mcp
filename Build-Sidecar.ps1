@@ -49,6 +49,11 @@ try {
 
     Write-Host "Nuitka build. This takes several minutes." -ForegroundColor Cyan
 
+    # The search model hf_api_lookup uses ships inside the binary, so the
+    # connector never downloads anything. Fetch it once, at build time.
+    & uv run python scripts/vendor_embed_model.py
+    if ($LASTEXITCODE -ne 0) { throw "Could not vendor the search model." }
+
     $args = @(
         'run', 'python', '-m', 'nuitka',
 
@@ -66,6 +71,21 @@ try {
         '--include-package=anyio',
         '--include-package=pydantic',
         '--include-package=pydantic_core',
+
+        # The engine notes and the bundled search model are package data, which
+        # --include-package does not carry. Without this, hf_api_lookup ships
+        # with no notes and falls back to keyword search.
+        '--include-package-data=hullforge_mcp',
+
+        # The search model's runtime. fastembed imports these inside a function,
+        # and onnxruntime loads its provider DLLs by path.
+        '--include-package=fastembed',
+        '--include-package=tokenizers',
+        '--include-package=onnxruntime',
+        # fastembed's model loader goes through huggingface_hub even for a local
+        # folder, and that imports filelock's submodules lazily.
+        '--include-package=huggingface_hub',
+        '--include-package=filelock',
 
         # console mode: the MCP stdio transport IS the console streams. A
         # windowed build starts and then answers nothing at all.

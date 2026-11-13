@@ -186,3 +186,35 @@ def test_humanise_and_generated_descriptions():
     assert ai.humanise("K2_SetTimerDelegate") == "Set Timer Delegate"
     r = ai.Record(id="f", kind="factory", name="UMaterialFactoryNew", text="", base="UFactory")
     assert "creates new Material assets" in r.about()
+
+
+def test_without_the_bundled_model_nothing_is_downloaded(tmp_path, monkeypatch):
+    monkeypatch.setattr(ai, "EMBED_MODEL_DIR", tmp_path / "missing")
+    import sys, types
+    called = []
+    fake = types.ModuleType("fastembed")
+    fake.TextEmbedding = lambda *a, **k: called.append(k)
+    monkeypatch.setitem(sys.modules, "fastembed", fake)
+    index = ai.ApiIndex(records())
+    index.build_embeddings()
+    assert called == []
+    assert index.status.embeddings.startswith("unavailable: the search model is not bundled")
+    assert index.search("duplicate asset")[0][1].name == "UEditorAssetLibrary.DuplicateAsset"
+
+
+def test_bundled_model_is_loaded_offline_from_its_own_folder(tmp_path, monkeypatch):
+    np = pytest.importorskip("numpy")
+    d = tmp_path / "embed_model"; d.mkdir()
+    for f in ai.EMBED_MODEL_FILES:
+        (d / f).write_text("x")
+    monkeypatch.setattr(ai, "EMBED_MODEL_DIR", d)
+    import sys, types
+    seen = {}
+    def make(name, **kw):
+        seen.update(kw); return _FakeEmbedder()
+    fake = types.ModuleType("fastembed"); fake.TextEmbedding = make
+    monkeypatch.setitem(sys.modules, "fastembed", fake)
+    index = ai.ApiIndex(records())
+    index.build_embeddings()
+    assert index.status.embeddings == "ready"
+    assert seen == {"specific_model_path": str(d), "local_files_only": True}
