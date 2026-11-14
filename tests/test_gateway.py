@@ -191,6 +191,29 @@ class TestCalls:
         assert not r.is_error
         assert sent(editor, "hf_delete_actor")[0]["args"] == {"actor": "Rock", "confirm": True}
 
+    async def test_write_preview_goes_to_the_preview_tool(self, gw):
+        srv, editor = gw
+        editor.tool("hf_preview_write")(lambda msg: _reply(msg, {"previewable": True, "changes": []}))
+        r = await call(srv, "hf_write", {"tool": "hf_set_actor_visibility", "args": {"actor": "Rock"}, "preview": True})
+        assert not r.is_error
+        assert not sent(editor, "hf_set_actor_visibility")
+        assert sent(editor, "hf_preview_write")[0]["args"] == {
+            "tool": "hf_set_actor_visibility", "args": {"actor": "Rock"}}
+
+    async def test_destroy_preview_needs_no_confirm_and_destroys_nothing(self, gw):
+        srv, editor = gw
+        editor.tool("hf_preview_write")(lambda msg: _reply(msg, {"previewable": True, "changes": []}))
+        r = await call(srv, "hf_destroy", {"tool": "hf_delete_actor", "args": {"actor": "Rock"}, "preview": True})
+        assert not r.is_error
+        assert not sent(editor, "hf_delete_actor")
+        # The tool itself still sees confirm, inside the rolled-back run.
+        assert sent(editor, "hf_preview_write")[0]["args"]["args"] == {"actor": "Rock", "confirm": True}
+
+    async def test_destroy_without_preview_still_needs_confirm(self, gw):
+        srv, editor = gw
+        r = await call(srv, "hf_destroy", {"tool": "hf_delete_actor", "args": {"actor": "Rock"}})
+        assert r.is_error and not sent(editor, "hf_delete_actor")
+
     async def test_bad_args_never_reach_the_editor(self, gw):
         srv, editor = gw
         r = await call(srv, "hf_write", {"tool": "hf_set_sequence_key", "args": {"sequence": "S", "frame": "ten"}})

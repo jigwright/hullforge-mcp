@@ -608,8 +608,10 @@ class HullForgeServer:
                 f"{_gateway.caller_for(entry.kind)}, not {caller}. Nothing was changed."
             )
 
+        preview = args.get("preview") is True and caller != _gateway.READ
+
         if caller == _gateway.DESTROY:
-            if args.get("confirm") is not True:
+            if args.get("confirm") is not True and not preview:
                 return _error(
                     f"hf_destroy refused '{tool}': confirm must be true. Set it only "
                     f"for a deletion the user asked for. Nothing was changed."
@@ -628,6 +630,10 @@ class HullForgeServer:
                 + f"\n\nSchema for {tool}:\n{json.dumps(entry.schema, indent=2)}"
             )
 
+        if preview:
+            # Run under an undo transaction in the editor and rolled back there;
+            # nothing changes, so a destroy preview needs no confirm.
+            return await self._dispatch("hf_preview_write", {"tool": tool, "args": inner})
         if tool in _FOCUS_FOR_CAPTURE and not inner.get("window"):
             return await self._capture_in_front(tool, inner)
         return await self._dispatch(tool, inner)
