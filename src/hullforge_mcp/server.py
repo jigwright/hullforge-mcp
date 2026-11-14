@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from typing import Any
 
 import mcp.types as types
@@ -26,11 +27,13 @@ from .client import BridgeClient, BridgeError, ToolFailed, ToolOutcomeUnknown
 from . import api_index as _api_index
 from . import gateway as _gateway
 from . import focus as _focus
+from . import crash as _crash
 from .session import (
     SessionError,
     SessionInfo,
     discover,
     discover_all,
+    process_is_alive,
     session_registry_dir,
 )
 
@@ -146,6 +149,11 @@ class HullForgeServer:
         self._mutating: set[str] = set()
         self._session_key: tuple[int, str] | None = None
         self._editor_pid: int = 0
+        # The editor this connector last reached, kept after it goes away so
+        # its loss can be explained: which project, which process, and since
+        # when, so only a crash report written after that counts.
+        self._last_editor: dict[str, Any] | None = None
+        self._loss: dict[str, Any] | None = None
         self._mcp_session: Any = None
         # The gateway's view of the editor's catalog: searched, validated
         # against, never listed. See gateway.py.
@@ -183,9 +191,53 @@ class HullForgeServer:
         self._client = client
         self._session_key = (info.port, info.token)
         self._editor_pid = int(getattr(info, "pid", 0) or 0)
+        self._last_editor = {
+            "pid": self._editor_pid,
+            "project": info.project_name,
+            "project_dir": info.project_dir,
+            "connected_at": time.time(),
+        }
+        self._loss = None
         log.info("connected to %s on port %d (v%s)",
                  info.project_name or "editor", info.port, client.server_version)
         return client
+
+    def _editor_loss(self) -> dict[str, Any] | None:
+        """Why the editor last connected to is gone, or None while it lives.
+
+        Only answers when the process is really gone: a dropped socket to a
+        live editor is a network problem, not a crash, and is not reported as
+        one.
+        """
+        if self._loss is not None:
+            return self._loss
+        last = self._last_editor
+        if not last or not last["pid"] or process_is_alive(last["pid"]):
+            return None
+        report = _crash.find_latest_crash(last["project_dir"], last["connected_at"])
+        loss = {
+            "project": last["project"],
+            "pid": last["pid"],
+            "crashed": report is not None,
+            "crash": report,
+            "summary": _crash.describe_loss(last["project"], report),
+        }
+        # A crash report can land a moment after the process is gone, so only
+        # a found report is final; "closed" is looked at again next time.
+        if report is not None:
+            self._loss = loss
+            log.warning("editor %s (pid %d) crashed: %s", last["project"], last["pid"],
+                        report.get("error", "?"))
+        return loss
+
+    def _with_loss(self, text: str) -> types.CallToolResult:
+        """An error result, with the reason the editor went away when it did."""
+        loss = self._editor_loss()
+        if loss is None:
+            return _error(text)
+        result = _error(f"{text}\n\n{loss['summary']}")
+        result.structured_content = {"editor_lost": loss}
+        return result
 
     def _pick_session(self) -> SessionInfo:
         """The editor to talk to.
@@ -351,7 +403,7 @@ class HullForgeServer:
                 result = await client.call(name, args, operation_id=op_id)
                 deduplicated = client.last_call_deduplicated
             except ToolOutcomeUnknown as exc:
-                return _error(
+                return self._with_loss(
                     f"OUTCOME UNKNOWN for '{name}': {exc}\n\n"
                     f"The editor stopped waiting. This is NOT a reported failure - "
                     f"the operation may have taken effect. Check current state before "
@@ -360,7 +412,7 @@ class HullForgeServer:
             except ToolFailed as exc:
                 return _error(f"'{name}' failed: {exc}")
             except SessionError as exc:
-                return _error(str(exc))
+                return self._with_loss(str(exc))
             except BridgeError as exc:
                 # Transport died. Drop the client so the next attempt
                 # re-discovers rather than reusing a half-dead socket.
@@ -369,7 +421,7 @@ class HullForgeServer:
                 if attempt + 1 < attempts:
                     log.warning("transport error on %r, retrying once: %s", name, exc)
                     continue
-                return _error(
+                return self._with_loss(
                     f"Bridge error calling '{name}': {exc}"
                     + (
                         ""
@@ -676,8 +728,14 @@ class HullForgeServer:
             ],
             "tool_count": len(self._catalog),
         }
+        loss = self._editor_loss() if not connected else None
+        if loss is not None:
+            payload["last_editor_lost"] = loss
 
-        if not sessions:
+        if loss is not None and not any(
+                s.project_dir == (self._last_editor or {}).get("project_dir") for s in sessions):
+            message = f"NOT CONNECTED - {loss['summary']}"
+        elif not sessions:
             message = (
                 "NOT CONNECTED - no running Unreal editor was found.\n\n"
                 "Open your project in Unreal Engine with the HullForge plugin "
@@ -734,6 +792,7 @@ class HullForgeServer:
                 log.info("editor went away; dropping connection")
                 self._client = None
                 self._session_key = None
+                self._editor_loss()
 
             # The tool list never changes, but the catalog behind it may: a
             # different editor can hold different tools. Forget it, and the next

@@ -159,10 +159,20 @@ class BridgeClient:
         if self._writer is None or self._reader is None:
             raise BridgeError("Not connected.")
 
-        self._writer.write(encode_frame(json.dumps(payload)))
-        await self._writer.drain()
+        # A socket to an editor that has crashed or closed fails here as an OS
+        # error. It is a transport failure like any other, so it becomes a
+        # BridgeError and the caller's retry, reconnect and crash explanation
+        # apply; let through, it would surface as an unhandled exception and
+        # the agent would get no answer at all.
+        try:
+            self._writer.write(encode_frame(json.dumps(payload)))
+            await self._writer.drain()
+            frame = await self._read_frame()
+        except (ConnectionError, OSError, asyncio.IncompleteReadError) as exc:
+            self._writer = None
+            self._reader = None
+            raise BridgeError(f"Lost the connection to the editor: {exc}") from exc
 
-        frame = await self._read_frame()
         try:
             decoded = json.loads(frame)
         except json.JSONDecodeError as exc:

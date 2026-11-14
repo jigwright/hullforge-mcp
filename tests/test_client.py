@@ -178,6 +178,23 @@ class TestProtocolFaults:
             await c.call("t")
         await c.close()
 
+    async def test_calls_after_the_editor_dies_are_bridge_errors(self, editor):
+        # An editor that crashed leaves a socket whose next write fails with a
+        # raw OS error. It must come out as a BridgeError, every time, or the
+        # agent gets an unhandled exception instead of an answer.
+        @editor.tool("t")
+        def _(msg):
+            return {"id": msg["id"], "ok": True, "status": "ok", "result": {}}
+
+        c = BridgeClient(editor.session())
+        await c.connect()
+        await c.call("t")
+        await editor.stop()
+        for _ in range(3):
+            with pytest.raises(BridgeError):
+                await c.call("t")
+        await c.close()
+
     async def test_request_timeout_warns_against_blind_retry(self, editor):
         # A tool the editor never answers - the exact shape of the editor being
         # wedged behind a modal dialog. The message must not read as "failed",
