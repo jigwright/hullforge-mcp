@@ -25,6 +25,7 @@ from mcp.server.lowlevel import NotificationOptions, Server
 from .client import BridgeClient, BridgeError, ToolFailed, ToolOutcomeUnknown
 from . import api_index as _api_index
 from . import gateway as _gateway
+from . import focus as _focus
 from .session import (
     SessionError,
     SessionInfo,
@@ -32,6 +33,9 @@ from .session import (
     discover_all,
     session_registry_dir,
 )
+
+# Window captures that only show a current frame while the editor is in front.
+_FOCUS_FOR_CAPTURE = frozenset({"hf_screenshot"})
 
 log = logging.getLogger("hullforge")
 
@@ -141,6 +145,7 @@ class HullForgeServer:
         self._areas: dict[str, str] = {}
         self._mutating: set[str] = set()
         self._session_key: tuple[int, str] | None = None
+        self._editor_pid: int = 0
         self._mcp_session: Any = None
         # The gateway's view of the editor's catalog: searched, validated
         # against, never listed. See gateway.py.
@@ -177,6 +182,7 @@ class HullForgeServer:
         await client.connect()                      # raises BridgeError
         self._client = client
         self._session_key = (info.port, info.token)
+        self._editor_pid = int(getattr(info, "pid", 0) or 0)
         log.info("connected to %s on port %d (v%s)",
                  info.project_name or "editor", info.port, client.server_version)
         return client
@@ -232,8 +238,35 @@ class HullForgeServer:
             # meaningless - creating a material instance is a write, not a
             # hazard - and a reader who learns to ignore it also ignores it on
             # hf_delete_asset.
-            destructive = name in _DESTRUCTIVE
+            #
+            # THE EDITOR DECIDES. A tool declares bHazardous next to its
+            # handler and hf_describe_tools sends it down with the rest. The
+            # set below is kept only to catch a disagreement: two copies of one
+            # fact in two repositories is how the fact goes stale, and nothing
+            # here could ever have noticed a tool that became dangerous.
+            ann = entry.get("annotations")
+            ann = ann if isinstance(ann, dict) else {}
+            declared = ann.get("destructiveHint")
+            if declared is None:
+                declared = entry.get("hazardous")
+            if declared is None:
+                # An editor too old to send it. Fall back rather than call
+                # everything safe, which is the failure that matters.
+                destructive = name in _DESTRUCTIVE
+                log.debug("no destructiveHint for %r; using the local set", name)
+            else:
+                destructive = bool(declared)
+                if destructive != (name in _DESTRUCTIVE):
+                    log.warning(
+                        "destructive mismatch for %r: editor says %s, the set "
+                        "in server.py says %s. Trusting the editor. Update "
+                        "_DESTRUCTIVE or the tool's bHazardous so they agree.",
+                        name, destructive, name in _DESTRUCTIVE)
 
+            # idempotent_hint: true for reads by construction, and true for
+            # mutating tools because dispatch deduplicates on operation_id.
+            # Both hold, for different reasons. It used to be set to
+            # mutating_flag, which said a READ was not idempotent.
             tools.append(types.Tool(
                 name=name,
                 title=_display_title(name),
@@ -243,7 +276,7 @@ class HullForgeServer:
                 annotations=types.ToolAnnotations(
                     read_only_hint=not mutating_flag,
                     destructive_hint=destructive,
-                    idempotent_hint=mutating_flag,  # we supply an operation_id
+                    idempotent_hint=True,
                 ),
             ))
 
@@ -543,7 +576,48 @@ class HullForgeServer:
                 + f"\n\nSchema for {tool}:\n{json.dumps(entry.schema, indent=2)}"
             )
 
+        if tool in _FOCUS_FOR_CAPTURE and not inner.get("window"):
+            return await self._capture_in_front(tool, inner)
         return await self._dispatch(tool, inner)
+
+    async def _capture_in_front(self, tool: str, args: dict[str, Any]) -> types.CallToolResult:
+        """A window capture, with the editor brought to the front for it.
+
+        A window capture shows what the editor last drew, and a background
+        editor draws rarely or not at all, so its 3D view is stale. Bringing
+        it forward for the moment of the capture, from this process, which
+        Windows allows - see focus.py - means nobody has to click the editor
+        first. Focus goes back to whatever had it straight after.
+        """
+        try:
+            await self._ensure_connected()
+        except (SessionError, BridgeError):
+            return await self._dispatch(tool, args)
+
+        state, hwnd, previous = await asyncio.to_thread(_focus.bring_forward, self._editor_pid)
+        try:
+            result = await self._dispatch(tool, args)
+        finally:
+            await asyncio.to_thread(_focus.restore, state, hwnd, previous)
+
+        focus_report = {
+            "editor_was_in_front": state.was_foreground,
+            "brought_forward": state.brought_forward,
+            "focus_returned": state.restored_previous,
+        }
+        if state.note:
+            focus_report["note"] = state.note
+        if isinstance(result.structured_content, dict):
+            result.structured_content["focus"] = focus_report
+        if state.window_found and not state.was_foreground and not state.brought_forward:
+            result.content.append(types.TextContent(
+                type="text",
+                text=("The editor could not be brought to the front, so its 3D view in "
+                      "this picture may be an old frame. Ask the user to click the Unreal "
+                      "window, or during play use hf_pie_capture, which renders offscreen "
+                      "and needs no focus."),
+            ))
+        return result
 
     @staticmethod
     def _to_content(name: str, result: dict[str, Any], deduplicated: bool = False) -> list[Any]:

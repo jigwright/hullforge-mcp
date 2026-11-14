@@ -567,3 +567,66 @@ class TestApiLookup:
     def test_requires_a_query(self):
         srv = self._server_with_index([])
         assert self._call(srv, {}).is_error
+
+
+class TestFocusForWindowCapture:
+    """A window capture brings the editor forward for the moment of the capture
+    and gives focus back, so nobody has to click the editor first."""
+
+    @pytest.fixture
+    def shot(self, editor):
+        @editor.tool("hf_screenshot")
+        def _(msg):
+            return {"id": msg["id"], "ok": True, "status": "ok", "result": {
+                "image_base64": TestImageContent.PNG_B64,
+                "mime_type": "image/png", "width": 1, "height": 1,
+                "source": "slate_window",
+            }}
+        return editor
+
+    @staticmethod
+    def fake_focus(monkeypatch, *, brought: bool, calls: list):
+        from hullforge_mcp import server as server_mod
+
+        def bring(pid):
+            calls.append(("bring", pid))
+            r = server_mod._focus.FocusResult(window_found=True, brought_forward=brought)
+            if not brought:
+                r.note = "refused"
+            return r, 101, 202
+
+        def restore(r, hwnd, previous):
+            calls.append(("restore", hwnd, previous))
+            r.restored_previous = r.brought_forward
+
+        monkeypatch.setattr(server_mod._focus, "bring_forward", bring)
+        monkeypatch.setattr(server_mod._focus, "restore", restore)
+
+    async def test_brings_forward_then_restores(self, wired, shot, monkeypatch):
+        srv, _ = wired
+        calls: list = []
+        self.fake_focus(monkeypatch, brought=True, calls=calls)
+        result = await srv._capture_in_front("hf_screenshot", {})
+        assert [c[0] for c in calls] == ["bring", "restore"]
+        assert calls[1][1:] == (101, 202)
+        assert result.structured_content["focus"]["brought_forward"] is True
+        assert result.structured_content["focus"]["focus_returned"] is True
+
+    async def test_says_so_when_windows_refuses(self, wired, shot, monkeypatch):
+        srv, _ = wired
+        calls: list = []
+        self.fake_focus(monkeypatch, brought=False, calls=calls)
+        result = await srv._capture_in_front("hf_screenshot", {})
+        texts = " ".join(c.text for c in result.content if getattr(c, "type", None) == "text")
+        assert "click the Unreal window" in texts
+        assert "hf_pie_capture" in texts
+
+    async def test_targeted_window_capture_is_left_alone(self, wired, shot, monkeypatch):
+        srv, _ = wired
+        calls: list = []
+        self.fake_focus(monkeypatch, brought=True, calls=calls)
+        from hullforge_mcp.server import _FOCUS_FOR_CAPTURE
+        assert "hf_screenshot" in _FOCUS_FOR_CAPTURE
+        result = await srv._dispatch("hf_screenshot", {"window": "Output Log"})
+        assert calls == []
+        assert "focus" not in result.structured_content
