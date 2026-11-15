@@ -28,6 +28,8 @@ from . import api_index as _api_index
 from . import gateway as _gateway
 from . import focus as _focus
 from . import crash as _crash
+from . import playbooks as _playbooks
+from mcp.shared.exceptions import MCPError
 from .session import (
     SessionError,
     SessionInfo,
@@ -177,6 +179,13 @@ class HullForgeServer:
         )
         self.server.add_request_handler(
             "tools/call", types.CallToolRequestParams, self._handle_call_tool,
+        )
+        # The workflow playbooks. Fixed text, served with or without an editor.
+        self.server.add_request_handler(
+            "prompts/list", types.PaginatedRequestParams, self._handle_list_prompts,
+        )
+        self.server.add_request_handler(
+            "prompts/get", types.GetPromptRequestParams, self._handle_get_prompt,
         )
 
     # -- bridge ------------------------------------------------------------
@@ -351,6 +360,27 @@ class HullForgeServer:
         # first. The editor's own tools are reached through the gateway.
         return types.ListToolsResult(tools=[_BRIDGE_STATUS_TOOL, *_gateway.TOOLS])
 
+    async def _handle_list_prompts(self, ctx: Any, params: Any) -> types.ListPromptsResult:
+        return types.ListPromptsResult(prompts=_playbooks.list_prompts())
+
+    async def _handle_get_prompt(self, ctx: Any, params: Any) -> types.GetPromptResult:
+        try:
+            return _playbooks.get_prompt(params.name, params.arguments)
+        except ValueError as exc:
+            raise MCPError(-32602, str(exc)) from None
+
+    def _playbook(self, args: dict[str, Any]) -> types.CallToolResult:
+        """hf_search_tools {"playbook": ...}: the playbook for clients without prompts."""
+        key = _playbooks.resolve(str(args.get("playbook") or ""))
+        if key is None:
+            return _error(f"No playbook named '{args.get('playbook')}'. Playbooks: "
+                          f"{', '.join(_playbooks.ORDER)}.")
+        text = _playbooks.render(key, args.get("query") or None)
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text=text)],
+            structured_content={"playbook": key, "next": _playbooks.next_stage(key)},
+        )
+
     def _remember_session(self, ctx: Any) -> None:
         session = getattr(ctx, "session", None)
         if session is not None:
@@ -367,6 +397,9 @@ class HullForgeServer:
 
         if name == _gateway.LOOKUP:
             return await self._api_lookup(args)
+
+        if name == _gateway.SEARCH and args.get("playbook"):
+            return self._playbook(args)
 
         if name in _gateway.NAMES:
             return await self._gateway_call(name, args)
@@ -529,6 +562,8 @@ class HullForgeServer:
             lines = [f"{len(counts)} areas, {len(self._index)} tools. Search with a query, "
                      f"or pass an area to list its tools."]
             lines += [f"  {a} ({n})" for a, n in counts.items()]
+            lines += ["", "Playbooks for a whole task, in order (hf_search_tools with "
+                      "'playbook'):", _playbooks.overview()]
             return types.CallToolResult(
                 content=[types.TextContent(type="text", text="\n".join(lines))],
                 structured_content={"areas": counts},

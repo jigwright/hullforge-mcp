@@ -71,6 +71,9 @@ INSTRUCTIONS = (
     "To learn how the engine does something (which class or function, which module, "
     "known version traps), use hf_api_lookup; it reads the engine installed on this "
     "machine. "
+    "For a whole task, follow the playbooks in order: design, plan, build, verify. "
+    "Get each from hf_search_tools with playbook=<stage> (or as this server's "
+    "prompts); each names the tools to use and how to check the result. "
     "If a call reports that the outcome is UNKNOWN, check current state before "
     "retrying. If calls say no editor is connected, the user needs to open "
     "their Unreal project; hf_bridge_status reports what is found."
@@ -368,7 +371,8 @@ TOOLS: list[types.Tool] = [
             "words (\"hide an actor in game\", \"add a keyframe to a level sequence\"). "
             "Returns the best matches with their area, whether they read, write or "
             "destroy, and their required arguments. Give only 'area' to list every tool "
-            "in that area; give nothing to list the areas. Next: hf_tool_schema."
+            "in that area; give nothing to list the areas. Give 'playbook' (design, plan, "
+            "build, verify) for the steps of a whole task. Next: hf_tool_schema."
         ),
         input_schema={
             "type": "object",
@@ -378,6 +382,10 @@ TOOLS: list[types.Tool] = [
                 "kind": {"type": "string", "enum": [READ_KIND, WRITE_KIND, DESTROY_KIND],
                          "description": "Optional. Only tools that read, write or destroy."},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 25, "default": 8},
+                "playbook": {"type": "string", "enum": ["design", "plan", "build", "verify"],
+                             "description": "Optional. Instead of searching, return the step-by-step "
+                                            "playbook for one stage of a task, naming the tools to use. "
+                                            "'query' then fills in the goal."},
             },
             "additionalProperties": False,
         },
