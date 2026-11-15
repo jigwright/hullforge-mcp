@@ -763,6 +763,7 @@ class HullForgeServer:
                     "project_dir": s.project_dir,
                     "port": s.port,
                     "pid": s.pid,
+                    "source_edits": "on" if s.source_edits else "off",
                     "active": (s.port, s.token) == self._session_key,
                 }
                 for s in sessions
@@ -793,8 +794,13 @@ class HullForgeServer:
             active = next((s for s in sessions
                            if (s.port, s.token) == self._session_key), None)
             where = active.project_name if active else "an editor"
+            edits = "on" if active is not None and active.source_edits else "off"
             message = (
-                f"Connected to {where} with {len(self._catalog)} tools available."
+                f"Connected to {where} with {len(self._catalog)} tools available. "
+                f"C++ source edits are {edits}"
+                + ("." if edits == "on" else
+                   " (the user turns them on in Editor Preferences > Plugins > "
+                   "HullForge Source Edits).")
             )
 
         return types.CallToolResult(

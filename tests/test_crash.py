@@ -112,3 +112,15 @@ async def test_live_editor_is_never_reported_lost(tmp_path, monkeypatch):
                         "connected_at": time.time() - 60}
     monkeypatch.setattr(server_mod, "process_is_alive", lambda pid: True)
     assert srv._editor_loss() is None
+
+
+def test_bridge_status_reports_source_edits(tmp_path, monkeypatch):
+    from hullforge_mcp import server as server_mod
+    from hullforge_mcp.session import SessionInfo
+
+    on = SessionInfo(port=1, token="a", project_name="On", source_edits=True)
+    off = SessionInfo(port=2, token="b", project_name="Off")
+    monkeypatch.setattr(server_mod, "discover_all", lambda _dir=None: [on, off])
+    srv = HullForgeServer(tmp_path)
+    editors = {e["project"]: e["source_edits"] for e in srv._bridge_status().structured_content["editors"]}
+    assert editors == {"On": "on", "Off": "off"}

@@ -45,6 +45,14 @@ class TestRead:
         info = read_session(p)
         assert info.protocol == 1 and info.pid == 0 and info.project_name == ""
 
+    def test_source_edits_only_when_exactly_true(self, tmp_path):
+        assert read_session(write(tmp_path, {"port": 1, "token": "t"})).source_edits is False
+        assert read_session(write(tmp_path, {"port": 1, "token": "t",
+                                             "source_edits": True})).source_edits is True
+        # Anything but a JSON true is off: a hand-edited "yes" opts nobody in.
+        assert read_session(write(tmp_path, {"port": 1, "token": "t",
+                                             "source_edits": "true"})).source_edits is False
+
     def test_missing_file_mentions_the_editor(self, tmp_path):
         with pytest.raises(SessionError, match="editor"):
             read_session(tmp_path / "nope.json")

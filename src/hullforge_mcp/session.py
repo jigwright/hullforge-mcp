@@ -39,6 +39,10 @@ class SessionInfo:
     catalog_mode: bool = False
     catalog_areas: tuple[str, ...] = ()
 
+    # Allow source edits, set by the user in the editor. Absent from an older
+    # editor's session file, which had no source tools: off, as it meant.
+    source_edits: bool = False
+
 
 def session_file_path(project_dir: str | os.PathLike[str]) -> Path:
     return Path(project_dir) / "Saved" / "HullForge" / "session.json"
@@ -119,6 +123,7 @@ def read_session(path: str | os.PathLike[str]) -> SessionInfo:
         catalog_areas=tuple(
             str(a) for a in (data.get("catalog_areas") or []) if str(a).strip()
         ),
+        source_edits=data.get("source_edits") is True,
     )
 
 
