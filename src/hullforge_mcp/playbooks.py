@@ -113,13 +113,28 @@ For each batch in the plan:
    After UNKNOWN, read the current state before trying again.
 3. Blueprints: hf_compile_blueprint after editing one, then
    hf_list_blueprint_errors. Fix errors before moving on.
-4. If the batch went wrong, look before undoing:
+4. C++, when the plan calls for it. hf_bridge_status says whether the user
+   has turned on Allow source edits; if not, ask them to (Editor Preferences
+   > Plugins > HullForge Source Edits) and say what you will change. Then:
+   - hf_source_modules, then hf_source_new_class for a new class, or
+     hf_source_read and hf_source_patch (dry_run=true first) for an edit;
+   - hf_source_add_dependency when a warning names a module Build.cs lacks;
+   - hf_source_compile (mode check) and poll hf_get_compile; fix each error
+     by its file and line. If the compile is refused over a risk finding,
+     show it to the user (hf_source_risk_scan) and pass accept only once
+     they agree;
+   - mode live_coding loads the change into the running editor (if the user
+     has Live Coding on); then hf_source_quality_gate with the plan's tests,
+     polling hf_get_quality_gate. A new class or module needs a full build
+     and an editor restart instead: tell the user.
+   hf_source_restore with a write's backup id undoes it; editor undo does not.
+5. If the batch went wrong, look before undoing:
    hf_rollback_to_checkpoint with dry_run=true lists what would be undone,
    then call it through hf_destroy with confirm=true. hf_list_checkpoints
    shows what you can go back to; the change journal file it names is the
    record of every write.
-5. Show progress with hf_screenshot when the change is visible.
-6. When the batch is right, hf_save_all, so tests and the next batch start
+6. Show progress with hf_screenshot when the change is visible.
+7. When the batch is right, hf_save_all, so tests and the next batch start
    from saved work.
 
 Keep the user told: one line per batch done. If the plan turns out wrong,
@@ -194,6 +209,10 @@ KNOWN_TOOLS = frozenset({
     "hf_compile_blueprint", "hf_list_blueprint_errors", "hf_save_all",
     "hf_find_references", "hf_pie_get_log", "hf_pie_read", "hf_pie_capture",
     "hf_start_pie", "hf_stop_pie", "hf_pie_inject_input", "hf_pie_watch",
+    "hf_source_modules", "hf_source_new_class", "hf_source_read", "hf_source_patch",
+    "hf_source_add_dependency", "hf_source_compile", "hf_get_compile",
+    "hf_source_risk_scan", "hf_source_quality_gate", "hf_get_quality_gate",
+    "hf_source_restore",
 })
 
 # The connector's own tools, which playbooks also name.
