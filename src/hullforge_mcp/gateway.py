@@ -371,8 +371,13 @@ def _closest_argument(name: str, known: list[str]) -> str | None:
     """The real argument a wrong name most likely meant, or None."""
     import difflib
     low = name.lower()
-    for k in known:  # a prefix or part of a real name: name -> name_contains
-        if k.lower().startswith(low) or low in k.lower().split("_"):
+    # A real name that STARTS with it wins over one that merely contains it as
+    # a word: 'name' means name_contains, not class_name.
+    for k in known:
+        if k.lower().startswith(low):
+            return k
+    for k in known:
+        if low in k.lower().split("_"):
             return k
     hits = difflib.get_close_matches(name, known, n=1, cutoff=0.6)
     return hits[0] if hits else None

@@ -366,3 +366,11 @@ class TestNearestArgument:
         srv, editor = gw
         r = await call(srv, "hf_read", {"tool": "hf_describe_actor", "args": {"act": "Rock"}})
         assert r.is_error and "did you mean 'actor'" in text(r)
+
+
+def test_closest_argument_prefers_a_name_that_starts_with_the_word():
+    from hullforge_mcp.gateway import _closest_argument
+    known = ["path", "recursive", "class_name", "name_contains", "limit"]
+    assert _closest_argument("name", known) == "name_contains"
+    assert _closest_argument("class", known) == "class_name"
+    assert _closest_argument("contains", known) == "name_contains"
