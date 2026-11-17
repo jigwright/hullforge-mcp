@@ -52,6 +52,12 @@ TOOLS = [
     {"name": "hf_add_foliage_type_to_level", "description": "Register a foliage type in the open level.",
      "mutating": True, "area": "Foliage",
      "input_schema": _obj({"foliage_type": {"type": "string"}}, ["foliage_type"])},
+    {"name": "hf_pie_run_playtest", "description": "Run a playtest of steps in PIE.",
+     "mutating": True, "area": "PIE",
+     "input_schema": _obj({"steps": {"type": "array"}, "wait_seconds": {"type": "integer"}}, ["steps"])},
+    {"name": "hf_pie_get_playtest", "description": "The report of a playtest run.",
+     "mutating": False, "area": "PIE",
+     "input_schema": _obj({"run_id": {"type": "integer"}}, ["run_id"])},
 ]
 
 
@@ -285,3 +291,59 @@ class TestFailureHelp:
         assert len(lines) == 3 and lines[1]["repeat"] == 2
         assert lines[0]["args"] == ["frame", "sequence"]
         assert "Secret/Path" not in _json.dumps(lines)  # argument values are never logged
+
+
+class TestPlaytestWait:
+    """A short playtest returns its finished report from the one call."""
+
+    async def test_waits_for_the_report(self, gw):
+        srv, editor = gw
+        polls = {"n": 0}
+        editor.tool("hf_pie_run_playtest")(lambda msg: _reply(msg, {"run_id": 7, "steps": 2}))
+
+        def report(msg):
+            polls["n"] += 1
+            status = "running" if polls["n"] < 2 else "passed"
+            return _reply(msg, {"run_id": 7, "status": status})
+        editor.tool("hf_pie_get_playtest")(report)
+        r = await call(srv, "hf_write", {"tool": "hf_pie_run_playtest", "args": {"steps": [{"type": "wait"}]}})
+        assert not r.is_error
+        assert r.structured_content["status"] == "passed"
+        assert polls["n"] == 2
+
+    async def test_wait_zero_returns_the_run_id(self, gw):
+        srv, editor = gw
+        editor.tool("hf_pie_run_playtest")(lambda msg: _reply(msg, {"run_id": 8, "steps": 1}))
+        r = await call(srv, "hf_write", {"tool": "hf_pie_run_playtest", "args": {"steps": [], "wait_seconds": 0}})
+        assert r.structured_content["run_id"] == 8 and not sent(editor, "hf_pie_get_playtest")
+
+
+class TestFewerCalls:
+    async def test_several_queries_in_one_call(self, gw):
+        srv, _ = gw
+        r = await call(srv, "hf_search_tools", {"queries": ["hide an actor in game", "add a keyframe to a level sequence"]})
+        rows = r.structured_content["results"]
+        firsts = {}
+        for row in rows:
+            firsts.setdefault(row["query"], row["name"])
+        assert firsts == {"hide an actor in game": "hf_set_actor_visibility",
+                          "add a keyframe to a level sequence": "hf_set_sequence_key"}
+
+    async def test_every_hit_shows_the_exact_call(self, gw):
+        srv, _ = gw
+        r = await call(srv, "hf_search_tools", {"query": "hide an actor in game"})
+        assert r.structured_content["results"][0]["call"] == \
+            'hf_write {"tool": "hf_set_actor_visibility", "args": {"actor": "<actor>"}}'
+        assert 'call: hf_write {"tool": "hf_set_actor_visibility"' in text(r)
+
+    async def test_schema_points_to_top_level_tools(self, gw):
+        srv, _ = gw
+        r = await call(srv, "hf_tool_schema", {"names": ["hf_bridge_status", "hf_describe_actor"]})
+        tools = r.structured_content["tools"]
+        assert "directly" in tools[0]["call"] and "error" not in tools[0]
+        assert tools[1]["call"].startswith('hf_read {"tool": "hf_describe_actor"')
+
+    async def test_bridge_status_is_preloaded(self, gw):
+        srv, _ = gw
+        first = (await srv._handle_list_tools(None, None)).tools[0]
+        assert first.name == "hf_bridge_status" and first.meta.get("anthropic/alwaysLoad") is True

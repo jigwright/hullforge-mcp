@@ -30,9 +30,12 @@ class Playbook:
 
 
 _COMMON = (
-    "How to call HullForge: find a tool with hf_search_tools, get its exact "
-    "arguments with hf_tool_schema, then call it through hf_read, hf_write or "
-    "hf_destroy. Never guess arguments. If hf_bridge_status says no editor is "
+    "How to call HullForge: find tools with hf_search_tools (give 'queries' to "
+    "find several at once), get their exact arguments with hf_tool_schema (up to "
+    "10 per call), then call each through hf_read, hf_write or hf_destroy as its "
+    "'call' line shows - never by its own name. Never guess arguments. Prefer the "
+    "batch forms: hf_edit_blueprint_graph for a whole graph, hf_set_property with "
+    "'properties' for several values. If hf_bridge_status says no editor is "
     "connected, ask the user to open their Unreal project and stop there."
 )
 
@@ -76,9 +79,13 @@ Goal: {goal}
 Nothing is changed in this stage either.
 
 1. Break the work into small steps. Each step is one or a few tool calls and
-   has an expected result you can read back. Find every tool now with
-   hf_search_tools and fetch its arguments with hf_tool_schema, so the plan
-   holds real tool names and real arguments, not guesses.
+   has an expected result you can read back. Find every tool now with ONE
+   hf_search_tools call using 'queries' (one entry per need) and ONE
+   hf_tool_schema call for the tools you picked, so the plan holds real tool
+   names and real arguments, not guesses. A Blueprint graph is one
+   hf_edit_blueprint_graph step (nodes with refs, links "ref.Pin", defaults);
+   events come from kind event (BeginPlay, Tick, ActorBeginOverlap) or
+   component_event (a component's OnComponentBeginOverlap).
 2. Group the steps into batches of related changes (for example: assets, then
    the Blueprint, then placing it in the level, then input). Each batch starts
    with a checkpoint so it can be rolled back on its own.
@@ -89,8 +96,11 @@ Nothing is changed in this stage either.
    - the automation tests to run, as an hf_run_automation_tests filter
      (hf_list_automation_tests shows what exists);
    - a playtest for hf_pie_run_playtest: input steps, wait_until and expect
-     steps for the acceptance checks, capture steps for pictures, and an
-     expect_log step with min_verbosity Error and absent=true for "no errors".
+     steps for the acceptance checks, op exists with value false for something
+     that should be gone (a pickup consumed), set steps to start from a state
+     (Health 90 before a cap test), capture steps with look_at for pictures of
+     the thing being tested, and an expect_log step with min_verbosity Error
+     and absent=true for "no errors".
 5. Show the user the plan: batches, risky steps, and the checks. For small,
    easily undone work, go ahead; for anything large or destructive, wait for
    their yes.
@@ -111,8 +121,12 @@ For each batch in the plan:
    with preview=true and read what it would change. Every write reports what
    it verified: trust it, and stop on the first failure or UNKNOWN outcome.
    After UNKNOWN, read the current state before trying again.
-3. Blueprints: hf_compile_blueprint after editing one, then
-   hf_list_blueprint_errors. Fix errors before moving on.
+3. Blueprints: build each graph with one hf_edit_blueprint_graph call
+   (compile=true); a failed step rolls the whole call back and names the step,
+   so fix it and send it again (hf_compile_blueprint recompiles one on its
+   own). Set a component's properties with one
+   hf_set_property call using 'properties' on the template path that
+   hf_add_blueprint_component returned. Fix compile errors before moving on.
 4. C++, when the plan calls for it. hf_bridge_status says whether the user
    has turned on Allow source edits; if not, ask them to (Editor Preferences
    > Plugins > HullForge Source Edits) and say what you will change. Then:
@@ -155,8 +169,9 @@ Goal: {goal}
    poll hf_get_automation_run until it finishes. Report failures with their
    file and line. (It refuses while PIE runs or with unsaved work.)
 3. Playtest: hf_pie_run_playtest with start_pie=true and the plan's steps.
-   Poll hf_pie_get_playtest until it finishes; it returns each step's
-   pass/fail and the pictures taken (image_step fetches one). Look at the
+   It waits for a short run and returns the finished report (each step's
+   pass/fail); poll hf_pie_get_playtest only if it says it is still running.
+   hf_pie_get_playtest with image_step fetches a picture. Look at the
    pictures.
 4. When a step fails, find out why before changing anything:
    - hf_pie_get_log: what the game logged, filtered by category or text;
@@ -212,7 +227,8 @@ KNOWN_TOOLS = frozenset({
     "hf_source_modules", "hf_source_new_class", "hf_source_read", "hf_source_patch",
     "hf_source_add_dependency", "hf_source_compile", "hf_get_compile",
     "hf_source_risk_scan", "hf_source_quality_gate", "hf_get_quality_gate",
-    "hf_source_restore",
+    "hf_source_restore", "hf_edit_blueprint_graph", "hf_set_property",
+    "hf_add_blueprint_component",
 })
 
 # The connector's own tools, which playbooks also name.

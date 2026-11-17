@@ -68,7 +68,9 @@ _BRIDGE_STATUS_TOOL = types.Tool(
     # Core, like the editor tools it sits beside, so anything reading
     # _meta to group tools gets a complete answer and needs no special
     # case for the ones the sidecar synthesises.
-    meta={_AREA_META_KEY: _ALWAYS_ON_AREA},
+    # Preloaded in Claude Code like the gateway tools: a rehearsal agent
+    # spent three calls finding it (a schema lookup and two ToolSearch loads).
+    meta={_AREA_META_KEY: _ALWAYS_ON_AREA, "anthropic/alwaysLoad": True},
     name="hf_bridge_status",
     title="Bridge Status",
     description=(
@@ -551,6 +553,22 @@ class HullForgeServer:
         return [e.name for _, e in self._index.search(text.replace("_", " "), limit=limit)]
 
     def _gateway_search(self, args: dict[str, Any]) -> types.CallToolResult:
+        # SEVERAL QUERIES IN ONE CALL. A rehearsal agent made 17 searches to
+        # find a dozen well-known tools, one need at a time, and a single query
+        # naming four needs ranked an unrelated tool first. Each query here is
+        # ranked on its own and the answers come back together.
+        queries = args.get("queries")
+        if isinstance(queries, list) and queries:
+            parts, rows = [], []
+            for q in [str(x) for x in queries[:10] if str(x).strip()]:
+                one = self._gateway_search({**{k: v for k, v in args.items() if k != "queries"}, "query": q})
+                parts.append(f"## {q}\n{_result_text(one)}")
+                for r in (one.structured_content or {}).get("results", []):
+                    rows.append({**r, "query": q})
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text="\n\n".join(parts))],
+                structured_content={"results": rows},
+            )
         query = str(args.get("query") or "").strip()
         limit = max(1, min(int(args.get("limit") or 8), 25))
         kind = args.get("kind") or None
@@ -591,11 +609,13 @@ class HullForgeServer:
 
         rows = [{"name": e.name, "area": e.area, "kind": e.kind,
                  "call_with": _gateway.caller_for(e.kind),
+                 "call": _gateway.call_example(e),
                  "required": _gateway.required_args(e), "summary": e.summary} for _, e in hits]
         lines = [header]
         for r in rows:
             lines.append(f"- {r['name']}  [{r['area']} | {r['kind']} -> {r['call_with']}]\n"
-                         f"    {r['summary']}")
+                         f"    {r['summary']}\n"
+                         f"    call: {r['call']}")
             for arg, about in r["required"].items():
                 lines.append(f"    required {arg} ({about})")
         return types.CallToolResult(
@@ -611,12 +631,18 @@ class HullForgeServer:
         for raw in names[:10]:
             entry = self._index.entries.get(str(raw))
             if entry is None:
+                if str(raw) in _TOP_LEVEL:
+                    # One of the tools beside the catalog: call it as it is.
+                    out.append({"name": raw, "call": f"Call {raw} directly; it is one of "
+                                "HullForge's own tools, not one reached through hf_read/hf_write."})
+                    continue
                 out.append({"name": raw, "error": "no such tool",
                             "did_you_mean": self._suggest(str(raw))})
                 continue
             out.append({
                 "name": entry.name, "area": entry.area, "kind": entry.kind,
                 "call_with": _gateway.caller_for(entry.kind),
+                "call": _gateway.call_example(entry),
                 "description": entry.description,
                 "input_schema": entry.schema,
             })
@@ -740,7 +766,39 @@ class HullForgeServer:
             return await self._dispatch("hf_preview_write", {"tool": tool, "args": inner})
         if tool in _FOCUS_FOR_CAPTURE and not inner.get("window"):
             return await self._capture_in_front(tool, inner)
+        if tool == "hf_pie_run_playtest":
+            return await self._run_playtest_and_wait(inner)
         return await self._dispatch(tool, inner)
+
+    async def _run_playtest_and_wait(self, inner: dict[str, Any]) -> types.CallToolResult:
+        """Start a playtest and, by default, wait for its finished report.
+
+        A run plays out over later editor frames, so the editor cannot answer
+        with the result; the rehearsal agent polled hf_pie_get_playtest two or
+        three times per run for playtests that took under three seconds. The
+        wait happens here, outside the editor's game thread, so it blocks
+        nothing. wait_seconds=0 keeps the old start-and-poll behaviour.
+        """
+        try:
+            wait = float(inner.get("wait_seconds", 30))
+        except (TypeError, ValueError):
+            wait = 30.0
+        wait = max(0.0, min(wait, 120.0))
+        started = await self._dispatch("hf_pie_run_playtest", inner)
+        run_id = (started.structured_content or {}).get("run_id")
+        if started.is_error or wait <= 0 or run_id is None:
+            return started
+        deadline = time.monotonic() + wait
+        report = started
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.5)
+            report = await self._dispatch("hf_pie_get_playtest", {"run_id": run_id})
+            status = (report.structured_content or {}).get("status")
+            if report.is_error or status not in ("starting_pie", "running", "queued", "pending"):
+                return report
+        note = (f"\n\nStill running after {wait:.0f} s. Poll hf_pie_get_playtest with "
+                f"run_id {run_id} for the rest.")
+        return _with_text(report, _result_text(report) + note)
 
     async def _capture_in_front(self, tool: str, args: dict[str, Any]) -> types.CallToolResult:
         """A window capture, with the editor brought to the front for it.
@@ -935,6 +993,10 @@ class HullForgeServer:
                     await self.server.run(read, write, init_options)
                 finally:
                     tg.cancel_scope.cancel()
+
+
+# The tools listed beside the catalog, which are called directly.
+_TOP_LEVEL = {"hf_bridge_status", *_gateway.NAMES, _gateway.LOOKUP}
 
 
 def _result_text(result: types.CallToolResult) -> str:

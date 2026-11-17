@@ -22,6 +22,8 @@ the validation and the tool definitions; server.py does the dispatch.
 """
 from __future__ import annotations
 
+import json
+
 import math
 import re
 from dataclasses import dataclass, field
@@ -65,6 +67,7 @@ INSTRUCTIONS = (
     "hf_destroy (deletes and other destructive changes, which need confirm=true). "
     "hf_write and hf_destroy take preview=true to show exactly what a call would "
     "change, with nothing changed; use it before a large or destructive change. "
+    "hf_search_tools takes 'queries' to find several tools in one call. "
     "Search, then fetch the schema, then call. Never guess arguments: a call "
     "with wrong arguments is refused and the schema is returned. "
     "Every write is verified by reading it back; trust the result it reports. "
@@ -72,6 +75,8 @@ INSTRUCTIONS = (
     "engine saw it create, remove or change: use those paths in your next call. "
     "A refused call comes back with the docs of the arguments involved, so fix "
     "what it names; repeating an identical failed call is flagged and never helps. "
+    "Inner tools are never called by name: always hf_read/hf_write/hf_destroy "
+    "{\"tool\": ..., \"args\": ...}, as each search hit's 'call' line shows. "
     "Values may be written plainly: true, 25, [0,0,100] for a vector, "
     "/Game/Folder/Asset for an asset. "
     "To learn how the engine does something (which class or function, which module, "
@@ -198,6 +203,18 @@ class Entry:
 # the area and the first sentence next; the rest of the description is long
 # and mentions many neighbouring tools, so it counts least.
 _WEIGHTS = {"name": 3.0, "area": 1.5, "summary": 2.0, "body": 0.6}
+
+
+def call_example(entry: "Entry") -> str:
+    """The exact call to make, with the required arguments as placeholders.
+
+    Shown with every search hit and schema, because the tool's NAME alone
+    invites calling it directly, which no client can do: a rehearsal agent
+    that had called hf_set_pin_default correctly twice through hf_write then
+    called it bare and was refused by its own client.
+    """
+    req = {a: f"<{a}>" for a in (entry.required or [])}
+    return f'{caller_for(entry.kind)} {{"tool": "{entry.name}", "args": {json.dumps(req)}}}'
 
 
 class Index:
@@ -384,6 +401,10 @@ TOOLS: list[types.Tool] = [
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "What you want to do, in plain words. Tool names work too."},
+                "queries": {"type": "array", "items": {"type": "string"}, "maxItems": 10,
+                            "description": "Several needs at once, one per entry, each ranked on its own, "
+                                           "e.g. [\"create a blueprint\", \"add a component\", \"compile\"]. "
+                                           "Use instead of 'query' to find a task's tools in one call."},
                 "area": {"type": "string", "description": "Optional. Search or list within one area, e.g. Sequencer."},
                 "kind": {"type": "string", "enum": [READ_KIND, WRITE_KIND, DESTROY_KIND],
                          "description": "Optional. Only tools that read, write or destroy."},
