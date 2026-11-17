@@ -359,3 +359,10 @@ class TestBridgeStatusConnects:
         assert r.structured_content["connected"] is True
         assert r.structured_content["tool_count"] > 0
         assert text(r).startswith("Connected to FakeProject")
+
+
+class TestNearestArgument:
+    async def test_unknown_argument_names_the_real_one(self, gw):
+        srv, editor = gw
+        r = await call(srv, "hf_read", {"tool": "hf_describe_actor", "args": {"act": "Rock"}})
+        assert r.is_error and "did you mean 'actor'" in text(r)

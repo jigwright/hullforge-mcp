@@ -349,12 +349,33 @@ def validate(entry: Entry, args: dict[str, Any]) -> list[str]:
     except Exception:  # noqa: BLE001 - a bad schema is the editor's bug; don't block the call on it
         return []
     problems = []
+    known = list((entry.schema.get("properties") or {}).keys())
     for err in sorted(validator.iter_errors(args), key=lambda e: list(e.path)):
         where = ".".join(str(p) for p in err.path)
-        problems.append(f"{where}: {err.message}" if where else err.message)
+        message = err.message
+        # AN UNKNOWN ARGUMENT NAMES ITS NEAREST REAL ONE: 'name' for
+        # hf_find_assets is 'name_contains'. Spotting that in a pasted schema
+        # cost a rehearsal agent a retry.
+        if err.validator == "additionalProperties" and not err.path:
+            for extra in [k for k in args if k not in known]:
+                near = _closest_argument(extra, known)
+                if near:
+                    message += f" For '{extra}', did you mean '{near}'?"
+        problems.append(f"{where}: {message}" if where else message)
         if len(problems) >= 5:
             break
     return problems
+
+
+def _closest_argument(name: str, known: list[str]) -> str | None:
+    """The real argument a wrong name most likely meant, or None."""
+    import difflib
+    low = name.lower()
+    for k in known:  # a prefix or part of a real name: name -> name_contains
+        if k.lower().startswith(low) or low in k.lower().split("_"):
+            return k
+    hits = difflib.get_close_matches(name, known, n=1, cutoff=0.6)
+    return hits[0] if hits else None
 
 
 def caller_for(kind: str) -> str:
