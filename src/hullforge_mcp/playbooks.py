@@ -138,9 +138,11 @@ For each batch in the plan:
      show it to the user (hf_source_risk_scan) and pass accept only once
      they agree;
    - mode live_coding loads the change into the running editor (if the user
-     has Live Coding on); then hf_source_quality_gate with the plan's tests,
-     polling hf_get_quality_gate. A new class or module needs a full build
-     and an editor restart instead: tell the user.
+     has Live Coding on), new classes included: after it succeeds, spawn or
+     find the class to confirm it is there before asking for a restart. Then
+     hf_source_quality_gate with the plan's tests, polling
+     hf_get_quality_gate. Only a new MODULE, or a class Live Coding did not
+     register, needs a full build and an editor restart: tell the user.
    hf_source_restore with a write's backup id undoes it; editor undo does not.
 5. If the batch went wrong, look before undoing:
    hf_rollback_to_checkpoint with dry_run=true lists what would be undone,
