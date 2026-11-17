@@ -884,7 +884,7 @@ class HullForgeServer:
                     type="text", text=json.dumps(meta, indent=2) + note))
             return blocks
 
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2) + note)]
+        return [types.TextContent(type="text", text=_fit_json(result) + note)]
 
     def _bridge_status(self) -> types.CallToolResult:
         """Answerable with no editor running - that is the entire point."""
@@ -1008,6 +1008,49 @@ class HullForgeServer:
 
 # The tools listed beside the catalog, which are called directly.
 _TOP_LEVEL = {"hf_bridge_status", *_gateway.NAMES, _gateway.LOOKUP}
+
+
+# Claude Code refuses a tool result over about 25,000 tokens and parks it in a
+# file the agent then has to script its way through; a 200-row asset search
+# did that on camera. So every result is fitted to a budget here, once, for
+# all 3,000 tools: compact JSON first, then the longest lists trimmed, saying
+# exactly what was left out and how to get the rest.
+RESULT_CHAR_BUDGET = 24000
+
+
+def _fit_json(result: Any, budget: int = RESULT_CHAR_BUDGET) -> str:
+    text = json.dumps(result, indent=2)
+    if len(text) <= budget:
+        return text
+    text = json.dumps(result, separators=(",", ":"))
+    if len(text) <= budget or not isinstance(result, dict):
+        return text
+    fitted = dict(result)
+    trimmed: dict[str, str] = {}
+    lists = sorted((k for k, v in fitted.items() if isinstance(v, list) and len(v) > 1),
+                   key=lambda k: -len(json.dumps(fitted[k], separators=(",", ":"))))
+    for key in lists:
+        full = fitted[key]
+        lo, hi = 1, len(full)
+        while lo < hi:  # the most rows that still fit
+            mid = (lo + hi + 1) // 2
+            fitted[key] = full[:mid]
+            if len(json.dumps(fitted, separators=(",", ":"))) <= budget - 400:
+                lo = mid
+            else:
+                hi = mid - 1
+        fitted[key] = full[:lo]
+        if lo < len(full):
+            trimmed[key] = f"{lo} of {len(full)} shown"
+        if len(json.dumps(fitted, separators=(",", ":"))) <= budget - 400:
+            break
+    if trimmed:
+        fitted["_trimmed"] = {
+            **trimmed,
+            "why": "The full result was too large to read in one answer.",
+            "next": "Narrow the call (a filter, a path, a smaller limit) or page with offset to see the rest.",
+        }
+    return json.dumps(fitted, separators=(",", ":"))
 
 
 def _result_text(result: types.CallToolResult) -> str:

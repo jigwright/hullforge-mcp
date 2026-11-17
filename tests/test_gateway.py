@@ -374,3 +374,18 @@ def test_closest_argument_prefers_a_name_that_starts_with_the_word():
     assert _closest_argument("name", known) == "name_contains"
     assert _closest_argument("class", known) == "class_name"
     assert _closest_argument("contains", known) == "name_contains"
+
+
+def test_fit_json_keeps_small_results_and_trims_big_lists():
+    import json
+    from hullforge_mcp.server import _fit_json
+    small = {"a": [1, 2, 3]}
+    assert json.loads(_fit_json(small)) == small
+    big = {"assets": [{"path": f"/Game/Thing_{i:04d}", "class": "StaticMesh", "size": i} for i in range(2000)],
+           "total_matched": 2000}
+    text = _fit_json(big, budget=6000)
+    assert len(text) <= 6000
+    out = json.loads(text)
+    assert out["total_matched"] == 2000
+    assert 1 <= len(out["assets"]) < 2000
+    assert out["_trimmed"]["assets"].endswith("of 2000 shown")
