@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from typing import Any
 
@@ -29,6 +30,7 @@ from . import gateway as _gateway
 from . import focus as _focus
 from . import crash as _crash
 from . import playbooks as _playbooks
+from .friction import FrictionLog
 from mcp.shared.exceptions import MCPError
 from .session import (
     SessionError,
@@ -163,6 +165,10 @@ class HullForgeServer:
         # The engine API lookup. Built from the installed engine on first use,
         # in a thread, so it never blocks the editor tools.
         self._api = _api_index.LazyApiIndex()
+        # Every gateway call's outcome, for this session: what failed, and
+        # how often the same call failed again. See friction.py.
+        self._friction = FrictionLog(session_registry_dir().parent / "mcp" / "friction")
+        self._failures: dict[tuple[str, str], tuple[int, str]] = {}
         self.server: Server = Server(
             "hullforge",
             version="0.1.0",
@@ -620,6 +626,69 @@ class HullForgeServer:
         )
 
     async def _gateway_invoke(self, caller: str, args: dict[str, Any]) -> types.CallToolResult:
+        """Run one inner tool, then make a failure as cheap to recover from as
+        possible and log the outcome. Every tool in the catalog passes through
+        here, so this is where a hint helps all of them at once."""
+        result = await self._gateway_invoke_inner(caller, args)
+        return self._after_call(caller, args, result)
+
+    def _after_call(self, caller: str, args: dict[str, Any],
+                    result: types.CallToolResult) -> types.CallToolResult:
+        tool = str(args.get("tool") or "")
+        inner = args.get("args") if isinstance(args.get("args"), dict) else {}
+        ok = not result.is_error
+        message = _result_text(result)
+        repeat = 0
+        if not ok and not _is_transport_failure(message, result):
+            key = (tool, json.dumps(inner, sort_keys=True, default=str))
+            first = message.strip().splitlines()[0] if message.strip() else ""
+            prev = self._failures.get(key)
+            repeat = prev[0] + 1 if prev and prev[1] == first else 1
+            self._failures[key] = (repeat, first)
+            notes = self._failure_notes(tool, inner, message, repeat)
+            if notes:
+                result = _with_text(result, f"{message}\n\n{notes}")
+        self._friction.record(caller=caller, tool=tool, ok=ok, error=message,
+                              repeat=repeat, arg_names=list(inner))
+        return result
+
+    def _failure_notes(self, tool: str, inner: dict[str, Any], message: str,
+                       repeat: int) -> str:
+        """What to change before the next attempt.
+
+        THE SAME CALL FAILING AGAIN is the costliest pattern there is: a
+        rehearsal agent sent an identical refused call twice in three of its
+        eight snags. So a repeat says so, plainly.
+
+        AND THE ARGUMENTS' OWN DOCUMENTATION, from the tool's schema, for the
+        arguments that were sent and any the error names. Most refusals are
+        about a value's form, and the form is written down in the schema the
+        agent did not fetch. Only those arguments, not the whole schema: this
+        rides on every failure and has to stay small.
+        """
+        lines: list[str] = []
+        if repeat >= 2:
+            lines.append(
+                f"THIS EXACT CALL HAS NOW FAILED {repeat} TIMES with the same error. "
+                f"Repeating it will not change the answer: change the arguments as the "
+                f"error says, or find another tool with hf_search_tools."
+            )
+        entry = self._index.entries.get(tool)
+        if entry is not None and "Schema for" not in message:
+            props = (entry.schema or {}).get("properties") or {}
+            names = [n for n in inner if n in props]
+            names += [n for n in props if n not in names
+                      and re.search(rf"(?<![A-Za-z0-9_]){re.escape(n)}(?![A-Za-z0-9_])", message)]
+            notes = []
+            for n in names[:6]:
+                about = str((props.get(n) or {}).get("description") or "").strip()
+                if about:
+                    notes.append(f"- {n}: {about[:300]}")
+            if notes:
+                lines.append(f"From {tool}'s schema:\n" + "\n".join(notes))
+        return "\n\n".join(lines)
+
+    async def _gateway_invoke_inner(self, caller: str, args: dict[str, Any]) -> types.CallToolResult:
         tool = str(args.get("tool") or "")
         inner = args.get("args") or {}
         if not isinstance(inner, dict):
@@ -769,6 +838,8 @@ class HullForgeServer:
                 for s in sessions
             ],
             "tool_count": len(self._catalog),
+            # Where this session's calls went wrong; see friction.py.
+            "friction": self._friction.summary(),
         }
         loss = self._editor_loss() if not connected else None
         if loss is not None:
@@ -864,6 +935,27 @@ class HullForgeServer:
                     await self.server.run(read, write, init_options)
                 finally:
                     tg.cancel_scope.cancel()
+
+
+def _result_text(result: types.CallToolResult) -> str:
+    return "\n".join(c.text for c in (result.content or []) if isinstance(c, types.TextContent))
+
+
+def _with_text(result: types.CallToolResult, text: str) -> types.CallToolResult:
+    """The same result with its text replaced, structured content kept."""
+    out = types.CallToolResult(content=[types.TextContent(type="text", text=text)],
+                               is_error=result.is_error)
+    out.structured_content = result.structured_content
+    return out
+
+
+def _is_transport_failure(message: str, result: types.CallToolResult) -> bool:
+    """Not the tool's answer but the bridge's: nothing about arguments to fix."""
+    if result.structured_content and "editor_lost" in (result.structured_content or {}):
+        return True
+    return (message.startswith("OUTCOME UNKNOWN")
+            or "No running Unreal editor" in message
+            or "transport" in message.lower()[:200])
 
 
 def _error(message: str) -> types.CallToolResult:

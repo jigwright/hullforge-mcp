@@ -46,7 +46,9 @@ TOOLS = [
      "input_schema": _obj({"actor": {"type": "string"}, "confirm": {"type": "boolean"}}, ["actor", "confirm"])},
     {"name": "hf_set_sequence_key", "description": "Set a keyframe on a track in a level sequence.",
      "mutating": True, "area": "Sequencer",
-     "input_schema": _obj({"sequence": {"type": "string"}, "frame": {"type": "integer"}}, ["sequence", "frame"])},
+     "input_schema": _obj({"sequence": {"type": "string"},
+                           "frame": {"type": "integer", "description": "Frame number on the display rate, e.g. 120."}},
+                          ["sequence", "frame"])},
     {"name": "hf_add_foliage_type_to_level", "description": "Register a foliage type in the open level.",
      "mutating": True, "area": "Foliage",
      "input_schema": _obj({"foliage_type": {"type": "string"}}, ["foliage_type"])},
@@ -235,3 +237,51 @@ class TestCalls:
         srv, editor = gw
         r = await call(srv, "hf_delete_actor", {"actor": "Rock", "confirm": True})
         assert r.is_error and not sent(editor, "hf_delete_actor")
+
+
+def _fail(msg, error):
+    return {"id": msg["id"], "ok": False, "status": "failed", "error": error}
+
+
+class TestFailureHelp:
+    """A refusal carries what to change, and the same refusal twice says so."""
+
+    async def test_refusal_carries_the_arguments_docs(self, gw):
+        srv, editor = gw
+        editor.tool("hf_set_sequence_key")(lambda msg: _fail(msg, "frame 9000 is past the end of the sequence."))
+        r = await call(srv, "hf_write", {"tool": "hf_set_sequence_key", "args": {"sequence": "S", "frame": 9000}})
+        assert r.is_error
+        assert "From hf_set_sequence_key's schema" in text(r)
+        assert "Frame number on the display rate" in text(r)
+        assert "FAILED" not in text(r)  # a first failure is not a repeat
+
+    async def test_the_same_failure_twice_is_called_out(self, gw):
+        srv, editor = gw
+        editor.tool("hf_set_sequence_key")(lambda msg: _fail(msg, "frame 9000 is past the end of the sequence."))
+        args = {"tool": "hf_set_sequence_key", "args": {"sequence": "S", "frame": 9000}}
+        await call(srv, "hf_write", args)
+        r = await call(srv, "hf_write", args)
+        assert "HAS NOW FAILED 2 TIMES" in text(r)
+        # Different arguments are a new attempt, not a repeat.
+        r = await call(srv, "hf_write", {"tool": "hf_set_sequence_key", "args": {"sequence": "S", "frame": 10}})
+        assert "FAILED 2 TIMES" not in text(r)
+
+    async def test_friction_is_logged_and_summarised(self, gw, tmp_path):
+        import json as _json
+        from hullforge_mcp.friction import FrictionLog
+        srv, editor = gw
+        srv._friction = FrictionLog(tmp_path / "friction")
+        editor.tool("hf_set_sequence_key")(lambda msg: _fail(msg, "no such sequence."))
+        args = {"tool": "hf_set_sequence_key", "args": {"sequence": "Secret/Path", "frame": 1}}
+        await call(srv, "hf_write", args)
+        await call(srv, "hf_write", args)
+        await call(srv, "hf_read", {"tool": "hf_describe_actor", "args": {"actor": "Rock"}})
+
+        summary = (await call(srv, "hf_bridge_status")).structured_content["friction"]
+        assert summary["calls"] == 3 and summary["failed"] == 2 and summary["repeated_failures"] == 1
+        assert summary["top_failing"][0] == {"tool": "hf_set_sequence_key", "failures": 2}
+
+        lines = [_json.loads(l) for l in (tmp_path / "friction").glob("*.jsonl").__next__().read_text().splitlines()]
+        assert len(lines) == 3 and lines[1]["repeat"] == 2
+        assert lines[0]["args"] == ["frame", "sequence"]
+        assert "Secret/Path" not in _json.dumps(lines)  # argument values are never logged
