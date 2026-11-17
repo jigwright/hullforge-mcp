@@ -401,6 +401,17 @@ class HullForgeServer:
         args = params.arguments or {}
 
         if name == _BRIDGE_STATUS_TOOL.name:
+            # CONNECT FIRST, THEN REPORT. Answering "found but not yet
+            # connected" for a live editor is true and useless: an agent that
+            # checks status before anything else (it is preloaded, so it
+            # does) read that as broken and stopped. A failed connect is
+            # reported by the status below as it always was.
+            if self._client is None or not self._client.connected:
+                try:
+                    if discover_all(self._project_dir):
+                        await self._refresh_catalog()
+                except (SessionError, BridgeError) as exc:
+                    log.info("bridge status: connect attempt failed: %s", exc)
             return self._bridge_status()
 
         if name == _gateway.LOOKUP:

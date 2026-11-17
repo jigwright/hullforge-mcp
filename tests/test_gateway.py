@@ -347,3 +347,15 @@ class TestFewerCalls:
         srv, _ = gw
         first = (await srv._handle_list_tools(None, None)).tools[0]
         assert first.name == "hf_bridge_status" and first.meta.get("anthropic/alwaysLoad") is True
+
+
+class TestBridgeStatusConnects:
+    async def test_status_connects_to_a_found_editor(self, gw):
+        # An agent that checks status first must hear "connected", not
+        # "found but not yet connected" - a rehearsal agent stopped on that.
+        srv, _ = gw
+        assert srv._client is None
+        r = await call(srv, "hf_bridge_status")
+        assert r.structured_content["connected"] is True
+        assert r.structured_content["tool_count"] > 0
+        assert text(r).startswith("Connected to FakeProject")
