@@ -170,6 +170,11 @@ class HullForgeServer:
         # Every gateway call's outcome, for this session: what failed, and
         # how often the same call failed again. See friction.py.
         self._friction = FrictionLog(session_registry_dir().parent / "mcp" / "friction")
+        # The workflow stage last loaded. Design and plan change nothing, and
+        # saying so in the playbook was not enough: an agent asked in a design
+        # to "compile it and place one" built the lot. While one of them is
+        # the stage, writes are refused; loading build or verify lifts it.
+        self._stage: str | None = None
         self._failures: dict[tuple[str, str], tuple[int, str]] = {}
         self.server: Server = Server(
             "hullforge",
@@ -373,9 +378,28 @@ class HullForgeServer:
 
     async def _handle_get_prompt(self, ctx: Any, params: Any) -> types.GetPromptResult:
         try:
-            return _playbooks.get_prompt(params.name, params.arguments)
+            result = _playbooks.get_prompt(params.name, params.arguments)
         except ValueError as exc:
             raise MCPError(-32602, str(exc)) from None
+        self._enter_stage(_playbooks.resolve(str(params.name or "")))
+        return result
+
+    def _enter_stage(self, key: str | None) -> None:
+        if key in _playbooks.ORDER:
+            self._stage = key
+
+    def _stage_refusal(self, tool: str) -> types.CallToolResult | None:
+        """Refuse a change while the stage is one that changes nothing."""
+        if self._stage not in ("design", "plan"):
+            return None
+        return _error(
+            f"'{tool}' was not run: this is the {self._stage} stage, which changes "
+            f"nothing. Finish the {self._stage} - write it to the user - and stop there. "
+            f"The user starts building with the build command (/hullforge:build). "
+            f"Only if the user has since told you plainly to make changes now, load the "
+            f"build playbook with hf_search_tools {{\"playbook\": \"build\"}}, which lifts "
+            f"this. Reading and hf_write with preview=true still work. Nothing was changed."
+        )
 
     def _playbook(self, args: dict[str, Any]) -> types.CallToolResult:
         """hf_search_tools {"playbook": ...}: the playbook for clients without prompts."""
@@ -384,6 +408,7 @@ class HullForgeServer:
             return _error(f"No playbook named '{args.get('playbook')}'. Playbooks: "
                           f"{', '.join(_playbooks.ORDER)}.")
         text = _playbooks.render(key, args.get("query") or None)
+        self._enter_stage(key)
         return types.CallToolResult(
             content=[types.TextContent(type="text", text=text)],
             structured_content={"playbook": key, "next": _playbooks.next_stage(key)},
@@ -750,6 +775,11 @@ class HullForgeServer:
             )
 
         preview = args.get("preview") is True and caller != _gateway.READ
+
+        if caller != _gateway.READ and not preview:
+            refused = self._stage_refusal(tool)
+            if refused is not None:
+                return refused
 
         if caller == _gateway.DESTROY:
             if args.get("confirm") is not True and not preview:

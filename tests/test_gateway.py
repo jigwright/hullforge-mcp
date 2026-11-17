@@ -389,3 +389,51 @@ def test_fit_json_keeps_small_results_and_trims_big_lists():
     assert out["total_matched"] == 2000
     assert 1 <= len(out["assets"]) < 2000
     assert out["_trimmed"]["assets"].endswith("of 2000 shown")
+
+
+class TestStageLock:
+    """Design and plan change nothing; build and verify lift that."""
+
+    async def _stage(self, srv, name):
+        await call(srv, "hf_search_tools", {"playbook": name})
+
+    async def test_design_refuses_writes_but_reads_work(self, gw):
+        srv, editor = gw
+        await self._stage(srv, "design")
+        r = await call(srv, "hf_write", {"tool": "hf_set_actor_visibility", "args": {"actor": "Rock"}})
+        assert r.is_error and "design stage" in text(r)
+        assert not sent(editor, "hf_set_actor_visibility")
+        r = await call(srv, "hf_destroy", {"tool": "hf_delete_actor", "args": {"actor": "Rock"}, "confirm": True})
+        assert r.is_error and not sent(editor, "hf_delete_actor")
+        r = await call(srv, "hf_read", {"tool": "hf_describe_actor", "args": {"actor": "Rock"}})
+        assert not r.is_error
+
+    async def test_plan_refuses_and_build_lifts_it(self, gw):
+        srv, editor = gw
+        await self._stage(srv, "plan")
+        r = await call(srv, "hf_write", {"tool": "hf_set_actor_visibility", "args": {"actor": "Rock"}})
+        assert r.is_error and "plan stage" in text(r)
+        await self._stage(srv, "build")
+        r = await call(srv, "hf_write", {"tool": "hf_set_actor_visibility", "args": {"actor": "Rock"}})
+        assert not r.is_error and sent(editor, "hf_set_actor_visibility")
+
+    async def test_preview_is_allowed_in_design(self, gw):
+        srv, editor = gw
+        editor.tool("hf_preview_write")(lambda msg: _reply(msg, {"previewable": True, "changes": []}))
+        await self._stage(srv, "design")
+        r = await call(srv, "hf_write", {"tool": "hf_set_actor_visibility", "args": {"actor": "Rock"}, "preview": True})
+        assert not r.is_error
+
+    async def test_no_stage_means_no_lock(self, gw):
+        srv, editor = gw
+        r = await call(srv, "hf_write", {"tool": "hf_set_actor_visibility", "args": {"actor": "Rock"}})
+        assert not r.is_error
+
+    async def test_the_design_slash_command_sets_the_lock(self, gw):
+        srv, editor = gw
+        await srv._handle_get_prompt(None, types.GetPromptRequestParams(name="design", arguments={"goal": "a door"}))
+        r = await call(srv, "hf_write", {"tool": "hf_set_actor_visibility", "args": {"actor": "Rock"}})
+        assert r.is_error and "design stage" in text(r)
+        await srv._handle_get_prompt(None, types.GetPromptRequestParams(name="build", arguments={}))
+        r = await call(srv, "hf_write", {"tool": "hf_set_actor_visibility", "args": {"actor": "Rock"}})
+        assert not r.is_error

@@ -44,7 +44,9 @@ _DESIGN = """\
 
 Goal: {goal}
 
-Nothing is changed in this stage. Read, look and ask.
+Nothing is changed in this stage, even when the goal says "make", "compile"
+or "place": describe how you will do it and stop. HullForge refuses changes
+until the build stage. Read, look and ask.
 
 1. Ground yourself in the project.
    - hf_bridge_status: which editor and project you are connected to.
