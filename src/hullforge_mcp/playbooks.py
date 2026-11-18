@@ -17,6 +17,7 @@ list is checked against the plugin source when the plugin is beside us.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 import mcp.types as types
 
@@ -32,8 +33,9 @@ class Playbook:
 _COMMON = (
     "How to call HullForge: find tools with hf_search_tools (give 'queries' to "
     "find several at once), get their exact arguments with hf_tool_schema (up to "
-    "10 per call), then call each through hf_read, hf_write or hf_destroy as its "
-    "'call' line shows - never by its own name. Never guess arguments. Prefer the "
+    "10 per call) unless the list at the end of this playbook already gives "
+    "them, then call each through hf_read, hf_write or hf_destroy - never by its "
+    "own name. Never guess arguments. Prefer the "
     "batch forms: hf_edit_blueprint_graph for a whole graph, hf_set_property with "
     "'properties' for several values. Calls that do not depend on each other "
     "(several reads, several independent writes) go out together in one "
@@ -247,13 +249,78 @@ GATEWAY_TOOLS = frozenset({
 })
 
 
-def render(name: str, goal: str | None = None) -> str:
-    """A playbook's full text, with the goal filled in."""
+# THE TOOLS EACH STAGE USUALLY NEEDS, shown with their arguments.
+# Measured over three demo sessions: the agents fetched the same thirty-odd
+# schemas every time, and searching plus fetching schemas was close to half of
+# every character the tools returned - all of it re-read on every later turn.
+# A few lines of signatures in the playbook replace most of that.
+TOOLKITS: dict[str, list[tuple[str, list[str]]]] = {
+    "design": [
+        ("Project and level", ["hf_get_project_context", "hf_census_world_actors", "hf_list_actors",
+                               "hf_find_assets", "hf_get_actor_bounds", "hf_describe_input_mappings",
+                               "hf_get_game_maps_settings", "hf_list_plugins", "hf_screenshot"]),
+        ("Navigation", ["hf_describe_world_navigation", "hf_audit_navigation"]),
+    ],
+    "plan": [
+        ("Checks to plan with", ["hf_list_automation_tests", "hf_test_path",
+                                 "hf_list_state_tree_node_types", "hf_get_actor_bounds"]),
+    ],
+    "build": [
+        ("Safety and saving", ["hf_set_checkpoint", "hf_rollback_to_checkpoint", "hf_save_all", "hf_screenshot"]),
+        ("Blueprints", ["hf_create_blueprint", "hf_add_blueprint_component", "hf_add_blueprint_variable",
+                        "hf_set_blueprint_variable", "hf_set_blueprint_defaults", "hf_edit_blueprint_graph",
+                        "hf_add_blueprint_function", "hf_compile_blueprint", "hf_list_blueprint_errors"]),
+        ("Level", ["hf_spawn_actor", "hf_set_property", "hf_get_property", "hf_add_gameplay_tag"]),
+        ("AI", ["hf_create_blackboard", "hf_add_blackboard_key", "hf_create_behavior_tree", "hf_add_bt_node",
+                "hf_add_bt_decorator", "hf_add_bt_service", "hf_set_bt_node_property",
+                "hf_set_bt_decorator_flow", "hf_describe_behavior_tree"]),
+        ("State Trees", ["hf_create_state_tree", "hf_add_state", "hf_add_state_transition",
+                         "hf_add_state_tree_node", "hf_set_state_tree_node_property",
+                         "hf_bind_state_tree_property", "hf_list_state_tree_node_types",
+                         "hf_compile_state_tree"]),
+        ("Audio", ["hf_create_metasound_source", "hf_add_metasound_graph_input", "hf_add_metasound_node",
+                   "hf_connect_metasound_nodes", "hf_set_metasound_node_input"]),
+        ("Navigation", ["hf_build_navigation", "hf_audit_navigation", "hf_test_path"]),
+    ],
+    "verify": [
+        ("Checks", ["hf_list_blueprint_errors", "hf_list_automation_tests", "hf_run_automation_tests",
+                    "hf_get_automation_run"]),
+        ("Play", ["hf_pie_run_playtest", "hf_pie_get_playtest", "hf_pie_get_log", "hf_pie_read",
+                  "hf_pie_capture", "hf_pie_get_behavior_tree", "hf_start_pie", "hf_stop_pie"]),
+    ],
+}
+
+_TOOLKIT_HEAD = (
+    "Tools this stage usually needs, as name(arguments) -> how to call it. "
+    "? marks an optional argument, * one that takes a list or object whose form "
+    "hf_tool_schema shows. Call these straight away; search only for anything "
+    "not listed, and fetch hf_tool_schema only for an argument marked * that "
+    "you have not used before."
+)
+
+
+def render(name: str, goal: str | None = None,
+           signature: "Callable[[str], str | None] | None" = None) -> str:
+    """A playbook's full text, with the goal filled in.
+
+    'signature' turns a tool name into its one-line signature from the live
+    catalog (None when the editor does not have that tool); without it the
+    toolkit is left out."""
     p = PLAYBOOKS[name]
     goal = (goal or "").strip() or "(not given: ask the user, or take it from the conversation)"
     stage = ORDER.index(name) + 1
     header = f"HullForge playbook {stage} of {len(ORDER)}: {' -> '.join(ORDER)}\n\n"
-    return header + p.body.format(goal=goal) + "\n" + _COMMON + "\n"
+    text = header + p.body.format(goal=goal) + "\n" + _COMMON + "\n"
+    if signature is not None and name in TOOLKITS:
+        lines = []
+        for group, tools in TOOLKITS[name]:
+            sigs = [x for x in (signature(t) for t in tools) if x]
+            if sigs:
+                lines.append(f"{group}:")
+                lines += [f"  {x}" for x in sigs]
+        if lines:
+            text += "\n" + _TOOLKIT_HEAD + "\n" + "\n".join(lines) + "\n"
+    return text
 
 
 def resolve(name: str) -> str | None:
@@ -270,7 +337,8 @@ def list_prompts() -> list[types.Prompt]:
     ]
 
 
-def get_prompt(name: str, arguments: dict[str, str] | None) -> types.GetPromptResult:
+def get_prompt(name: str, arguments: dict[str, str] | None,
+               signature: "Callable[[str], str | None] | None" = None) -> types.GetPromptResult:
     key = resolve(name)
     if key is None:
         raise ValueError(f"No playbook named '{name}'. Playbooks: {', '.join(ORDER)}.")
@@ -279,7 +347,7 @@ def get_prompt(name: str, arguments: dict[str, str] | None) -> types.GetPromptRe
         description=PLAYBOOKS[key].summary,
         messages=[types.PromptMessage(
             role="user",
-            content=types.TextContent(type="text", text=render(key, goal)),
+            content=types.TextContent(type="text", text=render(key, goal, signature)),
         )],
     )
 

@@ -381,7 +381,7 @@ class HullForgeServer:
 
     async def _handle_get_prompt(self, ctx: Any, params: Any) -> types.GetPromptResult:
         try:
-            result = _playbooks.get_prompt(params.name, params.arguments)
+            result = _playbooks.get_prompt(params.name, params.arguments, self._signature)
         except ValueError as exc:
             raise MCPError(-32602, str(exc)) from None
         self._enter_stage(_playbooks.resolve(str(params.name or "")))
@@ -410,12 +410,30 @@ class HullForgeServer:
         if key is None:
             return _error(f"No playbook named '{args.get('playbook')}'. Playbooks: "
                           f"{', '.join(_playbooks.ORDER)}.")
-        text = _playbooks.render(key, args.get("query") or None)
+        text = _playbooks.render(key, args.get("query") or None, self._signature)
         self._enter_stage(key)
         return types.CallToolResult(
             content=[types.TextContent(type="text", text=text)],
             structured_content={"playbook": key, "next": _playbooks.next_stage(key)},
         )
+
+    def _signature(self, tool: str) -> str | None:
+        """One line a playbook can show instead of a search and a schema fetch:
+        hf_add_state(asset, name, parent?, type?) -> hf_write."""
+        entry = self._index.entries.get(tool)
+        if entry is None:
+            return None
+        props = (entry.schema or {}).get("properties") or {}
+        required = list((entry.schema or {}).get("required") or [])
+        def show(arg: str) -> str:
+            kind = (props.get(arg) or {}).get("type")
+            star = "*" if kind in ("array", "object") else ""
+            return arg + star + ("" if arg in required else "?")
+        names = required + [a for a in props if a not in required and a not in ("force",)]
+        shown = [show(a) for a in names[:12]]
+        if len(names) > 12:
+            shown.append("...")
+        return f"{entry.name}({', '.join(shown)}) -> {_gateway.caller_for(entry.kind)}"
 
     def _remember_session(self, ctx: Any) -> None:
         session = getattr(ctx, "session", None)
@@ -514,12 +532,18 @@ class HullForgeServer:
             # the image block, duplicating them doubles the payload, and some
             # clients drop content[] when structured_content is present - which
             # would lose the picture and leave a megabyte of base64 behind.
-            structured = {k: v for k, v in result.items() if k != "image_base64"}
+            #
+            # AND THE STRUCTURED COPY IS THE LEAN ONE. Claude Code shows the
+            # model structured_content, not the text, when both are present
+            # (checked in a session transcript), so trimming only the text
+            # trimmed nothing the agent read.
+            lean = self._lean(name, result)
+            structured = dict(lean) if isinstance(lean, dict) else {"result": lean}
             if deduplicated:
                 structured["deduplicated"] = True
 
             return types.CallToolResult(
-                content=self._to_content(name, result, deduplicated),
+                content=self._to_content(name, result, deduplicated, lean),
                 structured_content=structured,
             )
 
@@ -650,7 +674,7 @@ class HullForgeServer:
                       f"Nothing matched '{query}'. Try other words, or list an area "
                       f"(hf_search_tools with only 'area').")
 
-        rows = [{"name": e.name, "area": e.area, "kind": e.kind,
+        rows = [{"name": e.name,
                  "call_with": _gateway.caller_for(e.kind),
                  "call": _gateway.call_example(e),
                  "required": _gateway.required_args(e), "summary": e.summary} for _, e in hits]
@@ -680,7 +704,7 @@ class HullForgeServer:
                             "did_you_mean": self._suggest(str(raw))})
                 continue
             out.append({
-                "name": entry.name, "area": entry.area, "kind": entry.kind,
+                "name": entry.name,
                 "call_with": _gateway.caller_for(entry.kind),
                 "call": _gateway.call_example(entry),
                 "description": entry.description,
@@ -884,7 +908,14 @@ class HullForgeServer:
             ))
         return result
 
-    def _to_content(self, name: str, result: dict[str, Any], deduplicated: bool = False) -> list[Any]:
+    def _lean(self, name: str, result: Any) -> Any:
+        """What the agent reads: repeats shortened, then fitted to the budget."""
+        if isinstance(result, dict):
+            result = {k: v for k, v in result.items() if k != "image_base64"}
+        return json.loads(_fit_json(self._shrink_repeats(name, result)))
+
+    def _to_content(self, name: str, result: dict[str, Any], deduplicated: bool = False,
+                    lean: Any = None) -> list[Any]:
         """Turn a tool result into MCP content blocks.
 
         A tool that returns image_base64 gets a real ImageContent block. This is
@@ -904,7 +935,7 @@ class HullForgeServer:
 
         image_b64 = result.get("image_base64")
         if isinstance(image_b64, str) and image_b64:
-            meta = self._shrink_repeats(name, {k: v for k, v in result.items() if k != "image_base64"})
+            meta = lean if lean is not None else self._lean(name, result)
             blocks: list[Any] = [
                 types.ImageContent(
                     type="image",
@@ -917,7 +948,9 @@ class HullForgeServer:
                     type="text", text=_compact(meta) + note))
             return blocks
 
-        return [types.TextContent(type="text", text=_fit_json(self._shrink_repeats(name, result)) + note)]
+        if lean is None:
+            lean = self._lean(name, result)
+        return [types.TextContent(type="text", text=_compact(lean) + note)]
 
     def _shrink_repeats(self, tool: str, result: Any) -> Any:
         """Send each long, repeated note once per session.

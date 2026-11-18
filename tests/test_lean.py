@@ -45,3 +45,34 @@ class TestLeanResults:
         assert len(slim["properties"]["force"]["description"]) < 100
         assert slim["properties"]["path"] == {"type": "string"}
         assert len(schema["properties"]["force"]["description"]) == 300  # the original is untouched
+
+
+class TestWhatTheAgentReads:
+    def test_the_lean_copy_is_trimmed_and_shortened(self, tmp_path):
+        # Claude Code shows the model structured_content, so the lean copy is
+        # the one that has to be small.
+        srv = HullForgeServer(tmp_path)
+        big = {"actors": [{"label": f"A{i}", "class": "StaticMeshActor" * 3} for i in range(2000)],
+               "not_checked": NOTE}
+        lean = srv._lean("hf_list_actors", big)
+        assert len(json.dumps(lean, separators=(",", ":"))) <= 12000
+        assert "_trimmed" in lean and lean["not_checked"] == NOTE
+        again = srv._lean("hf_list_actors", {"not_checked": NOTE})
+        assert again["not_checked"].startswith("(same as")
+
+    def test_image_bytes_never_reach_the_lean_copy(self, tmp_path):
+        srv = HullForgeServer(tmp_path)
+        assert "image_base64" not in srv._lean("hf_screenshot", {"image_base64": "x" * 50000, "width": 2})
+
+
+class TestToolkits:
+    def test_a_playbook_lists_its_tools_with_arguments(self):
+        from hullforge_mcp import playbooks
+        sig = lambda t: None if t == "hf_spawn_actor" else f"{t}(x) -> hf_write"
+        text = playbooks.render("build", "goal", sig)
+        assert "hf_create_blueprint(x) -> hf_write" in text
+        assert "hf_spawn_actor" not in text.split("Tools this stage")[1]  # a tool the editor lacks is left out
+
+    def test_without_a_catalog_there_is_no_toolkit(self):
+        from hullforge_mcp import playbooks
+        assert "Tools this stage" not in playbooks.render("build", "goal")
