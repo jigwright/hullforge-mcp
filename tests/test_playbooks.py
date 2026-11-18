@@ -61,7 +61,7 @@ class TestContent:
         assert playbooks.KNOWN_TOOLS <= used
 
     def test_gateway_tools_are_the_listed_ones(self):
-        assert playbooks.GATEWAY_TOOLS == {"hf_bridge_status", *gateway.NAMES, gateway.LOOKUP, gateway.BATCH}
+        assert playbooks.GATEWAY_TOOLS == {"hf_bridge_status", *gateway.NAMES, gateway.LOOKUP, gateway.BATCH, gateway.RESTART, gateway.NOTES}
 
     @pytest.mark.skipif(not _PLUGIN_SOURCE.is_dir(), reason="plugin source not beside the connector")
     def test_known_tools_exist_in_plugin(self):
@@ -127,7 +127,7 @@ class TestThroughSearch:
         r = await self._call(srv, {"playbook": "plan", "query": "add a health pickup"})
         assert not r.is_error
         assert "Goal: add a health pickup" in r.content[0].text
-        assert r.structured_content == {"playbook": "plan", "next": "build"}
+        assert {k: r.structured_content[k] for k in ("playbook", "next")} == {"playbook": "plan", "next": "build"}
 
     async def test_last_stage_has_no_next(self, srv):
         r = await self._call(srv, {"playbook": "verify"})

@@ -1,0 +1,12 @@
+{
+  "id": "pickup",
+  "prompt": "In the open level: create a Blueprint actor /Game/Eval/BP_EvalPickup with a sphere collision as its root and a cube static mesh under it, set its InitialLifeSpan default to 42, and place one at (0, 600, 120) labelled EvalPickup. Save. Keep it short.",
+  "checks": [
+    {"tool": "hf_get_blueprint_default", "args": {"blueprint": "/Game/Eval/BP_EvalPickup", "property": "InitialLifeSpan"}, "path": "value_text", "op": "contains", "value": "42"},
+    {"tool": "hf_get_property", "args": {"object": "EvalPickup", "property": "InitialLifeSpan"}, "path": "value", "op": "contains", "value": "42"}
+  ],
+  "cleanup": [
+    {"tool": "hf_delete_actor", "args": {"actor": "EvalPickup"}},
+    {"tool": "hf_delete_asset", "args": {"object": "/Game/Eval/BP_EvalPickup"}}
+  ]
+}

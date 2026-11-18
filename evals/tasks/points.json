@@ -1,0 +1,15 @@
+{
+  "id": "points",
+  "prompt": "In the open level, place five TargetPoint actors labelled EvalPoint_1 to EvalPoint_5 in a straight line along X starting at (0, -600, 50), 200 units apart. Keep it short.",
+  "checks": [
+    {"tool": "hf_get_property", "args": {"object": "EvalPoint_1", "property": "RootComponent.RelativeLocation"}, "path": "value", "op": "contains", "value": "Y=-600"},
+    {"tool": "hf_get_property", "args": {"object": "EvalPoint_5", "property": "RootComponent.RelativeLocation"}, "path": "value", "op": "contains", "value": "X=800"}
+  ],
+  "cleanup": [
+    {"tool": "hf_delete_actor", "args": {"actor": "EvalPoint_1"}},
+    {"tool": "hf_delete_actor", "args": {"actor": "EvalPoint_2"}},
+    {"tool": "hf_delete_actor", "args": {"actor": "EvalPoint_3"}},
+    {"tool": "hf_delete_actor", "args": {"actor": "EvalPoint_4"}},
+    {"tool": "hf_delete_actor", "args": {"actor": "EvalPoint_5"}}
+  ]
+}

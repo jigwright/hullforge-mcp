@@ -104,7 +104,7 @@ class TestFixedList:
     async def test_lists_only_the_gateway(self, gw):
         srv, _ = gw
         listed = [t.name for t in (await srv._handle_list_tools(None, None)).tools]
-        assert listed == ["hf_bridge_status", *gateway.NAMES, gateway.BATCH, gateway.LOOKUP]
+        assert listed == ["hf_bridge_status", *gateway.NAMES, gateway.BATCH, gateway.RESTART, gateway.LOOKUP]
 
     async def test_gateway_tools_load_up_front_in_claude_code(self, gw):
         srv, _ = gw
@@ -116,7 +116,7 @@ class TestFixedList:
         monkeypatch.setattr(server_mod, "discover_all", lambda _dir=None: [])
         srv = HullForgeServer(tmp_path)
         listed = [t.name for t in (await srv._handle_list_tools(None, None)).tools]
-        assert listed == ["hf_bridge_status", *gateway.NAMES, gateway.BATCH, gateway.LOOKUP]
+        assert listed == ["hf_bridge_status", *gateway.NAMES, gateway.BATCH, gateway.RESTART, gateway.LOOKUP]
 
     async def test_risk_annotations(self, gw):
         srv, _ = gw

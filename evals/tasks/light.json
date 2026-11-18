@@ -1,0 +1,11 @@
+{
+  "id": "light",
+  "prompt": "In the open level, add a point light labelled EvalLight at (0, 0, 400) with intensity 5000 and a pure red light colour. Keep it short.",
+  "checks": [
+    {"tool": "hf_get_property", "args": {"object": "EvalLight", "property": "PointLightComponent.Intensity"}, "path": "value", "op": "contains", "value": "5000"},
+    {"tool": "hf_get_property", "args": {"object": "EvalLight", "property": "PointLightComponent.LightColor"}, "path": "value", "op": "contains", "value": "R=255"}
+  ],
+  "cleanup": [
+    {"tool": "hf_delete_actor", "args": {"actor": "EvalLight"}}
+  ]
+}

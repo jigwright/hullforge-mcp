@@ -1,0 +1,18 @@
+{
+  "$comment": "Recommended .claude/settings.json for an Unreal project driven by HullForge. Reads and lookups run without asking; anything that destroys work, restarts the editor or changes how the project builds asks you first. Copy into <Project>/.claude/settings.json.",
+  "permissions": {
+    "allow": [
+      "mcp__hullforge__hf_bridge_status",
+      "mcp__hullforge__hf_search_tools",
+      "mcp__hullforge__hf_tool_schema",
+      "mcp__hullforge__hf_api_lookup",
+      "mcp__hullforge__hf_read",
+      "mcp__hullforge__hf_write",
+      "mcp__hullforge__hf_batch"
+    ],
+    "ask": [
+      "mcp__hullforge__hf_destroy",
+      "mcp__hullforge__hf_restart_editor"
+    ]
+  }
+}

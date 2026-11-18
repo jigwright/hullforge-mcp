@@ -43,7 +43,10 @@ _COMMON = (
     "verbose=true only when you need the full report. Calls that do not depend on each other "
     "(several reads, several independent writes) go out together in one "
     "message, not one per turn: every turn re-reads the whole conversation. "
-    "Look before searching: tools named in this playbook need no search. "
+    "Look before searching: tools named in this playbook need no search, and "
+    "a search's first hits list every argument. hf_batch also takes foreach, "
+    "if, assert, select and return, so a check-then-act sequence needs no "
+    "turn in between. Compiles and playtests wait for their result; never poll. "
     "List calls take a filter; ask for what you need, not everything. "
     "If hf_bridge_status says no editor is "
     "connected, ask the user to open their Unreal project and stop there."
@@ -79,6 +82,10 @@ until the build stage. Read, look and ask.
    - the acceptance checks from step 3;
    - risks: anything that deletes, renames, or touches many assets.
    Ask for a yes before planning work that deletes or reworks existing content.
+5. Save the design as the handoff to the next stages: hf_write
+   {{"tool": "hf_stage_notes", "args": {{"stage": "design", "text": "<the design,
+   with asset paths, labels and the acceptance checks>"}}}}. Later playbooks
+   include it, so each stage can start in a fresh conversation.
 
 Next: the plan playbook.
 """
@@ -116,6 +123,9 @@ Nothing is changed in this stage either.
 5. Show the user the plan: batches, risky steps, and the checks. For small,
    easily undone work, go ahead; for anything large or destructive, wait for
    their yes.
+6. Save the plan with hf_stage_notes (stage "plan"): the batches, the checks
+   and the playtest steps, complete enough to build from without this
+   conversation.
 
 Next: the build playbook.
 """
@@ -150,16 +160,20 @@ For each batch in the plan:
    - hf_source_modules, then hf_source_new_class for a new class, or
      hf_source_read and hf_source_patch (dry_run=true first) for an edit;
    - hf_source_add_dependency when a warning names a module Build.cs lacks;
-   - hf_source_compile (mode check) and poll hf_get_compile; fix each error
-     by its file and line. If the compile is refused over a risk finding,
-     show it to the user (hf_source_risk_scan) and pass accept only once
-     they agree;
-   - mode live_coding loads the change into the running editor (if the user
-     has Live Coding on), new classes included: after it succeeds, spawn or
-     find the class to confirm it is there before asking for a restart. Then
+   - write ALL the new or replaced files in ONE call: hf_source_write with
+     "files": [{{"path": ..., "content": ...}}, ...]. It writes them in order and
+     then compiles them (mode check) and WAITS for the result, so there is no
+     hf_get_compile polling; fix each error by its file and line with
+     hf_source_patch, then hf_source_compile (it waits too). If the compile is
+     refused over a risk finding, show it to the user (hf_source_risk_scan)
+     and pass accept only once they agree;
+   - to load the code: hf_source_compile mode live_coding (if the user has
+     Live Coding on). If its result says restart_required, or the change adds
+     a module dependency, or Live Coding did not register a new class, call
+     hf_restart_editor: it saves, closes, rebuilds, reopens and reconnects in
+     one call. Do not ask the user to restart by hand. Then
      hf_source_quality_gate with the plan's tests, polling
-     hf_get_quality_gate. Only a new MODULE, or a class Live Coding did not
-     register, needs a full build and an editor restart: tell the user.
+     hf_get_quality_gate.
    hf_source_restore with a write's backup id undoes it; editor undo does not.
 5. If the batch went wrong, look before undoing:
    hf_rollback_to_checkpoint with dry_run=true lists what would be undone,
@@ -172,6 +186,8 @@ For each batch in the plan:
 
 Keep the user told: one line per batch done. If the plan turns out wrong,
 stop and say so rather than improvising destructive changes.
+When every batch is done, save what was built (asset paths, actor labels,
+anything that differs from the plan) with hf_stage_notes (stage "build").
 
 Next: the verify playbook.
 """
@@ -247,13 +263,14 @@ KNOWN_TOOLS = frozenset({
     "hf_source_add_dependency", "hf_source_compile", "hf_get_compile",
     "hf_source_risk_scan", "hf_source_quality_gate", "hf_get_quality_gate",
     "hf_source_restore", "hf_edit_blueprint_graph", "hf_set_property",
-    "hf_add_blueprint_component",
+    "hf_add_blueprint_component", "hf_source_write",
 })
 
 # The connector's own tools, which playbooks also name.
 GATEWAY_TOOLS = frozenset({
     "hf_bridge_status", "hf_search_tools", "hf_tool_schema", "hf_read",
-    "hf_write", "hf_destroy", "hf_api_lookup", "hf_batch",
+    "hf_write", "hf_destroy", "hf_api_lookup", "hf_batch", "hf_restart_editor",
+    "hf_stage_notes",
 })
 
 
@@ -289,6 +306,8 @@ TOOLKITS: dict[str, list[tuple[str, list[str]]]] = {
         ("Audio", ["hf_create_metasound_source", "hf_add_metasound_graph_input", "hf_add_metasound_node",
                    "hf_connect_metasound_nodes", "hf_set_metasound_node_input"]),
         ("Navigation", ["hf_build_navigation", "hf_audit_navigation", "hf_test_path"]),
+        ("C++", ["hf_source_modules", "hf_source_new_class", "hf_source_write", "hf_source_patch",
+                 "hf_source_read", "hf_source_compile", "hf_source_add_dependency"]),
     ],
     "verify": [
         ("Checks", ["hf_list_blueprint_errors", "hf_list_automation_tests", "hf_run_automation_tests",
@@ -310,7 +329,7 @@ _TOOLKIT_HEAD = (
 
 
 def render(name: str, goal: str | None = None,
-           signature: "Callable[[str], str | None] | None" = None) -> str:
+           signature: "Callable[[str], str | None] | None" = None, notes: str = "") -> str:
     """A playbook's full text, with the goal filled in.
 
     'signature' turns a tool name into its one-line signature from the live
@@ -321,6 +340,9 @@ def render(name: str, goal: str | None = None,
     stage = ORDER.index(name) + 1
     header = f"HullForge playbook {stage} of {len(ORDER)}: {' -> '.join(ORDER)}\n\n"
     text = header + p.body.format(goal=goal) + "\n" + _COMMON + "\n"
+    if notes.strip():
+        text += ("\nNotes saved by the earlier stages (hf_stage_notes). They are the "
+                 "design and plan to work from:\n\n" + notes.strip() + "\n")
     if signature is not None and name in TOOLKITS:
         lines = []
         for group, tools in TOOLKITS[name]:
@@ -348,7 +370,8 @@ def list_prompts() -> list[types.Prompt]:
 
 
 def get_prompt(name: str, arguments: dict[str, str] | None,
-               signature: "Callable[[str], str | None] | None" = None) -> types.GetPromptResult:
+               signature: "Callable[[str], str | None] | None" = None,
+               notes: str = "") -> types.GetPromptResult:
     key = resolve(name)
     if key is None:
         raise ValueError(f"No playbook named '{name}'. Playbooks: {', '.join(ORDER)}.")
@@ -357,7 +380,7 @@ def get_prompt(name: str, arguments: dict[str, str] | None,
         description=PLAYBOOKS[key].summary,
         messages=[types.PromptMessage(
             role="user",
-            content=types.TextContent(type="text", text=render(key, goal, signature)),
+            content=types.TextContent(type="text", text=render(key, goal, signature, notes)),
         )],
     )
 
