@@ -388,8 +388,14 @@ class HullForgeServer:
     async def _handle_get_prompt(self, ctx: Any, params: Any) -> types.GetPromptResult:
         try:
             key = _playbooks.resolve(str(params.name or ""))
-            result = _playbooks.get_prompt(params.name, params.arguments, self._signature,
-                                           notes=self._stage_notes_text(key) if key else "")
+            try:
+                await self._ensure_connected()
+                if not len(self._index):
+                    await self._refresh_catalog()
+            except (SessionError, BridgeError):
+                pass
+            notes = await self._stage_notes_text_async(key) if key else ""
+            result = _playbooks.get_prompt(params.name, params.arguments, self._signature, notes=notes)
         except ValueError as exc:
             raise MCPError(-32602, str(exc)) from None
         self._enter_stage(_playbooks.resolve(str(params.name or "")))
@@ -403,6 +409,11 @@ class HullForgeServer:
         """Refuse a change while the stage is one that changes nothing."""
         if self._stage not in ("design", "plan"):
             return None
+        if tool in _NOTE_TOOLS:
+            # Notes are the stage's handoff, not a change to the project: the
+            # design stage was refused saving its design, and the next stage
+            # started blind.
+            return None
         return _error(
             f"'{tool}' was not run: this is the {self._stage} stage, which changes "
             f"nothing. Finish the {self._stage} - write it to the user - and stop there. "
@@ -412,14 +423,14 @@ class HullForgeServer:
             f"this. Reading and hf_write with preview=true still work. Nothing was changed."
         )
 
-    def _playbook(self, args: dict[str, Any]) -> types.CallToolResult:
+    async def _playbook(self, args: dict[str, Any]) -> types.CallToolResult:
         """hf_search_tools {"playbook": ...}: the playbook for clients without prompts."""
         key = _playbooks.resolve(str(args.get("playbook") or ""))
         if key is None:
             return _error(f"No playbook named '{args.get('playbook')}'. Playbooks: "
                           f"{', '.join(_playbooks.ORDER)}.")
-        text = _playbooks.render(key, args.get("query") or None, self._signature,
-                                 notes=self._stage_notes_text(key))
+        notes = await self._stage_notes_text_async(key)
+        text = _playbooks.render(key, args.get("query") or None, self._signature, notes=notes)
         self._enter_stage(key)
         return types.CallToolResult(
             content=[types.TextContent(type="text", text=text)],
@@ -659,7 +670,11 @@ class HullForgeServer:
             return _ensure_structured(await self._restart_editor(args))
 
         if name == _gateway.SEARCH and args.get("playbook"):
-            return self._playbook(args)
+            try:
+                await self._ensure_connected()
+            except (SessionError, BridgeError):
+                pass
+            return await self._playbook(args)
 
         if name in _gateway.NAMES:
             return _ensure_structured(await self._gateway_call(name, args))
@@ -898,6 +913,14 @@ class HullForgeServer:
         for raw in names[:10]:
             entry = self._index.entries.get(str(raw))
             if entry is None:
+                if str(raw) == _gateway.NOTES:
+                    out.append({"name": raw, "call_with": "hf_write (save) / hf_read (read)",
+                                "call": 'hf_write {"tool": "hf_stage_notes", "args": {"stage": "<design|plan|build|verify>", "text": "<handoff>"}}',
+                                "description": "Save this stage's handoff for the next stage (any stage, the design stage included).",
+                                "input_schema": {"type": "object", "properties": {
+                                    "stage": {"type": "string", "enum": list(_playbooks.ORDER)},
+                                    "text": {"type": "string"}}, "required": ["stage", "text"]}})
+                    continue
                 if str(raw) in _TOP_LEVEL:
                     # One of the tools beside the catalog: call it as it is.
                     out.append({"name": raw, "call": f"Call {raw} directly; it is one of "
@@ -988,7 +1011,7 @@ class HullForgeServer:
         if not isinstance(inner, dict):
             return _error("'args' must be an object of the tool's arguments. Nothing was changed.")
         if tool == _gateway.NOTES:
-            return self._stage_notes_call(caller, inner)
+            return await self._stage_notes_call(caller, inner)
         # Arguments the CONNECTOR handles, taken off before the editor's schema
         # sees them (the editor's schemas refuse unknown keys).
         extra: dict[str, Any] = {}
@@ -1243,8 +1266,32 @@ class HullForgeServer:
         name = re.sub(r"[^A-Za-z0-9_.-]", "_", str(getattr(self, "_project_name", "") or "project"))
         return base / name
 
+    def _project_notes_available(self) -> bool:
+        return "hf_add_project_note" in self._index.entries and "hf_get_project_notes" in self._index.entries
+
+    async def _stage_notes_text_async(self, stage: str | None) -> str:
+        """Notes saved by the stages before 'stage', for its playbook: the
+        project's own notes (tagged stage:<name>, however they were saved) or,
+        without an editor, the local files."""
+        if not stage or stage not in _playbooks.ORDER:
+            return ""
+        earlier = _playbooks.ORDER[:_playbooks.ORDER.index(stage)]
+        if not earlier:
+            return ""
+        if self._client is not None and self._client.connected and self._project_notes_available():
+            r = await self._dispatch("hf_get_project_notes", {"limit": 100})
+            notes = (r.structured_content or {}).get("notes") or [] if not r.is_error else []
+            latest: dict[str, str] = {}
+            for n in notes:
+                tags = [str(t) for t in (n.get("tags") or [])]
+                for e in earlier:
+                    if f"stage:{e}" in tags:
+                        latest[e] = str(n.get("text") or "")
+            if latest:
+                return "\n\n".join(f"## {e}\n{latest[e][:12000]}" for e in earlier if e in latest)
+        return self._stage_notes_text(stage)
+
     def _stage_notes_text(self, stage: str | None) -> str:
-        """Notes saved by the stages before 'stage', for its playbook."""
         if not stage or stage not in _playbooks.ORDER:
             return ""
         parts = []
@@ -1254,28 +1301,40 @@ class HullForgeServer:
                 parts.append(f"## {earlier}\n{f.read_text(encoding='utf-8')[:12000]}")
         return "\n\n".join(parts)
 
-    def _stage_notes_call(self, caller: str, inner: dict[str, Any]) -> types.CallToolResult:
+    async def _stage_notes_call(self, caller: str, inner: dict[str, Any]) -> types.CallToolResult:
         """hf_stage_notes: hf_write saves a stage's handoff, hf_read returns them.
 
         Lets each stage start in a fresh conversation (the user runs /clear)
         with the earlier stages' decisions in its playbook, instead of carrying
-        every result of every earlier stage in context. A 105-turn session
-        re-read about 266k tokens per turn."""
+        every result of every earlier stage in context. Saved as a project note
+        (tag stage:<name>) when the editor keeps them, so it lives in the
+        project folder and any client can read it; locally otherwise."""
         stage = str(inner.get("stage") or "")
         if caller == _gateway.WRITE:
             if stage not in _playbooks.ORDER or not str(inner.get("text") or "").strip():
                 return _error(f"hf_stage_notes needs stage ({', '.join(_playbooks.ORDER)}) and text.")
-            d = self._notes_dir()
-            d.mkdir(parents=True, exist_ok=True)
             text = str(inner["text"])[:20000]
-            (d / f"{stage}.md").write_text(text, encoding="utf-8")
-            for later in _playbooks.ORDER[_playbooks.ORDER.index(stage) + 1:]:
-                (d / f"{later}.md").unlink(missing_ok=True)
-            out = {"saved": stage, "chars": len(text),
+            where = "local"
+            if self._client is not None and self._client.connected and self._project_notes_available():
+                r = await self._dispatch("hf_add_project_note", {
+                    "text": text, "kind": "decision", "tags": [f"stage:{stage}", "handoff"],
+                    "author": "HullForge stage notes"})
+                if r.is_error:
+                    return r
+                where = "project notes"
+            else:
+                d = self._notes_dir()
+                d.mkdir(parents=True, exist_ok=True)
+                (d / f"{stage}.md").write_text(text, encoding="utf-8")
+            out = {"saved": stage, "chars": len(text), "in": where,
                    "next": "The next stage's playbook includes these notes, so it can start in a fresh conversation."}
         elif caller == _gateway.READ:
-            out = {s: (self._notes_dir() / f"{s}.md").read_text(encoding="utf-8")
-                   for s in _playbooks.ORDER if (self._notes_dir() / f"{s}.md").is_file()}
+            # Every stage's notes: what the verify stage would be given, plus its own.
+            text = await self._stage_notes_text_async(_playbooks.ORDER[-1])
+            own = self._notes_dir() / f"{_playbooks.ORDER[-1]}.md"
+            if own.is_file():
+                text += f"\n\n## {_playbooks.ORDER[-1]}\n" + own.read_text(encoding="utf-8")
+            out = {"notes": text or "(none saved yet)"}
         else:
             return _error("hf_stage_notes is called with hf_write (save) or hf_read (read).")
         return types.CallToolResult(content=[types.TextContent(type="text", text=_compact(out))],
@@ -1559,6 +1618,9 @@ class HullForgeServer:
 
 # The tools listed beside the catalog, which are called directly.
 _TOP_LEVEL = {"hf_bridge_status", *_gateway.NAMES, _gateway.LOOKUP, _gateway.BATCH, _gateway.RESTART}
+
+# Tools the stage lock lets through: they record the handoff, not project changes.
+_NOTE_TOOLS = frozenset({"hf_stage_notes", "hf_add_project_note", "hf_create_plan", "hf_update_plan"})
 
 # Arguments the connector takes off a tool's call and handles itself.
 _CONNECTOR_ARGS: dict[str, tuple[str, ...]] = {
