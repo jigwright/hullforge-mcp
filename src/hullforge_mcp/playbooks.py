@@ -291,7 +291,9 @@ TOOLKITS: dict[str, list[tuple[str, list[str]]]] = {
 }
 
 _TOOLKIT_HEAD = (
-    "Tools this stage usually needs, as name(arguments) -> how to call it. "
+    "Tools this stage usually needs, each as: caller tool {arguments}. Call "
+    "them as hf_write {\"tool\": \"hf_add_state\", \"args\": {...}} - the "
+    "caller is the only tool name you call, never the tool's own. "
     "? marks an optional argument, * one that takes a list or object whose form "
     "hf_tool_schema shows. Call these straight away; search only for anything "
     "not listed, and fetch hf_tool_schema only for an argument marked * that "

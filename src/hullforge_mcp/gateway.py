@@ -358,6 +358,27 @@ class Index:
         return scored[:limit]
 
 
+def coerce_args(entry: Entry, args: dict[str, Any]) -> dict[str, Any]:
+    """Accept the obvious other spelling of a vector, before validation.
+
+    A demo agent sent hf_test_path start=[-800,1000,0] where the schema wants
+    {x, y, z}, was refused, and spent a turn re-sending. When a top-level
+    argument's schema is an object with x/y(/z) properties and the value is a
+    list of that many numbers, it is rewritten; anything else is left alone
+    for the validator to judge."""
+    props = (entry.schema or {}).get("properties") or {}
+    out = dict(args)
+    for key, value in args.items():
+        spec = props.get(key) or {}
+        inner = spec.get("properties") or {}
+        if spec.get("type") != "object" or not isinstance(value, list):
+            continue
+        axes = [a for a in ("x", "y", "z", "w") if a in inner]
+        if axes and len(value) == len(axes) and all(isinstance(v, (int, float)) for v in value):
+            out[key] = dict(zip(axes, value))
+    return out
+
+
 def validate(entry: Entry, args: dict[str, Any]) -> list[str]:
     """Schema problems with args, as short sentences. Empty means it passes."""
     if Draft202012Validator is None:

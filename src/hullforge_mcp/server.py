@@ -433,7 +433,10 @@ class HullForgeServer:
         shown = [show(a) for a in names[:12]]
         if len(names) > 12:
             shown.append("...")
-        return f"{entry.name}({', '.join(shown)}) -> {_gateway.caller_for(entry.kind)}"
+        # THE CALLER COMES FIRST, written as the call is made. "name(args) ->
+        # hf_write" read as a tool of its own: a demo agent called
+        # mcp__hullforge__hf_add_blueprint_variable and was refused.
+        return f"{_gateway.caller_for(entry.kind)} {entry.name} {{{', '.join(shown)}}}"
 
     def _remember_session(self, ctx: Any) -> None:
         session = getattr(ctx, "session", None)
@@ -819,6 +822,7 @@ class HullForgeServer:
             if "confirm" in props and "confirm" not in inner:
                 inner = {**inner, "confirm": True}
 
+        inner = _gateway.coerce_args(entry, inner)
         problems = _gateway.validate(entry, inner)
         if problems:
             # The schema comes back with the refusal, so the next attempt can

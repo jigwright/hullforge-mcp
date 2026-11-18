@@ -76,3 +76,25 @@ class TestToolkits:
     def test_without_a_catalog_there_is_no_toolkit(self):
         from hullforge_mcp import playbooks
         assert "Tools this stage" not in playbooks.render("build", "goal")
+
+
+class TestForgivingArgs:
+    def _entry(self):
+        vec = {"type": "object", "properties": {"x": {"type": "number"}, "y": {"type": "number"}, "z": {"type": "number"}}}
+        return gateway.Entry(name="t", area="a", kind="read", description="",
+                             schema={"type": "object", "properties": {"start": vec, "tags": {"type": "object"}}})
+
+    def test_a_vector_list_becomes_xyz(self):
+        out = gateway.coerce_args(self._entry(), {"start": [-800, 1000, 0]})
+        assert out["start"] == {"x": -800, "y": 1000, "z": 0}
+
+    def test_other_values_are_left_for_the_validator(self):
+        e = self._entry()
+        assert gateway.coerce_args(e, {"start": [1, 2]})["start"] == [1, 2]
+        assert gateway.coerce_args(e, {"tags": [1, 2, 3]})["tags"] == [1, 2, 3]
+
+    def test_the_toolkit_line_starts_with_the_caller(self, tmp_path):
+        from hullforge_mcp import playbooks
+        text = playbooks.render("build", "g", lambda t: f"hf_write {t} {{a, b?}}")
+        assert "hf_write hf_create_blueprint {a, b?}" in text
+        assert "never the tool's own" in text
