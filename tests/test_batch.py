@@ -46,6 +46,15 @@ class TestBatch:
         assert r.is_error and "$nope" in r.structured_content["failed"]["error"]
         assert not sent(editor, "hf_set_actor_visibility")
 
+    async def test_a_missing_field_names_the_fields_that_are_there(self, gw):
+        srv, editor = gw
+        r = await call(srv, "hf_batch", {"steps": [
+            {"tool": "hf_describe_actor", "args": {"actor": "Rock"}, "as": "a"},
+            {"tool": "hf_set_actor_visibility", "args": {"actor": "$a.label"}}]})
+        err = r.structured_content["failed"]["error"]
+        assert "has no 'label'" in err and "tool" in err
+        assert not sent(editor, "hf_set_actor_visibility")
+
     async def test_the_stage_lock_still_holds(self, gw):
         srv, editor = gw
         srv._enter_stage("design")

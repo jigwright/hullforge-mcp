@@ -485,9 +485,8 @@ class HullForgeServer:
                 break
             try:
                 inner = _resolve_refs(step.get("args") or {}, named)
-            except KeyError as exc:
-                failed = {"step": i, "tool": tool, "error": f"reference {exc} names no earlier step "
-                          f"result. Names so far: {', '.join(named) or 'none'}."}
+            except _BadRef as exc:
+                failed = {"step": i, "tool": tool, "error": f"bad reference: {exc}. Nothing in this step was run."}
                 break
             caller = _gateway.READ if kind == _gateway.READ_KIND else _gateway.WRITE
             result = await self._gateway_invoke(caller, {"tool": tool, "args": inner, "verbose": verbose})
@@ -1248,6 +1247,11 @@ def _compact(value: Any) -> str:
 _REF = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)((?:\.[A-Za-z0-9_]+)*)")
 
 
+class _BadRef(KeyError):
+    def __str__(self) -> str:
+        return str(self.args[0])
+
+
 def _resolve_refs(value: Any, named: dict[str, Any]) -> Any:
     """Replace $name.field references with earlier step results (hf_batch).
 
@@ -1257,7 +1261,7 @@ def _resolve_refs(value: Any, named: dict[str, Any]) -> Any:
     '$' and names no step is left as written."""
     def lookup(name: str, path: str) -> Any:
         if name not in named:
-            raise KeyError(f"${name}")
+            raise _BadRef(f"${name} names no earlier step; names so far: {', '.join(named) or 'none'}")
         v = named[name]
         for part in [p for p in path.split(".") if p]:
             if isinstance(v, dict) and part in v:
@@ -1265,7 +1269,11 @@ def _resolve_refs(value: Any, named: dict[str, Any]) -> Any:
             elif isinstance(v, list) and part.isdigit() and int(part) < len(v):
                 v = v[int(part)]
             else:
-                raise KeyError(f"${name}{path}")
+                # SAY WHAT IS THERE. "names no earlier step result" for a
+                # step that exists but has no such field sent a demo agent
+                # looking for the wrong mistake.
+                have = ", ".join(v) if isinstance(v, dict) else type(v).__name__
+                raise _BadRef(f"${name}{path}: step '{name}' has no '{part}'; its result has: {have}")
         return v
     if isinstance(value, dict):
         return {k: _resolve_refs(v, named) for k, v in value.items()}
