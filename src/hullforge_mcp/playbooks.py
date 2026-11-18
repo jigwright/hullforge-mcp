@@ -36,8 +36,11 @@ _COMMON = (
     "10 per call) unless the list at the end of this playbook already gives "
     "them, then call each through hf_read, hf_write or hf_destroy - never by its "
     "own name. Never guess arguments. Prefer the "
-    "batch forms: hf_edit_blueprint_graph for a whole graph, hf_set_property with "
-    "'properties' for several values. Calls that do not depend on each other "
+    "batch forms: hf_batch for a run of dependent steps (each step can use an "
+    "earlier one's result as $name.field; it compiles what it touched and can "
+    "save), hf_edit_blueprint_graph for a whole graph, hf_set_property with "
+    "'properties' for several values. A successful write comes back short; pass "
+    "verbose=true only when you need the full report. Calls that do not depend on each other "
     "(several reads, several independent writes) go out together in one "
     "message, not one per turn: every turn re-reads the whole conversation. "
     "Look before searching: tools named in this playbook need no search. "
@@ -124,9 +127,14 @@ Goal: {goal}
 
 For each batch in the plan:
 
-1. hf_set_checkpoint with a label naming the batch ("before enemy Blueprint").
-   The session already has a "session start" checkpoint.
-2. Run the steps in order. Before a delete, rename or wide change, call it
+1. Run the batch as ONE hf_batch call where you can: checkpoint="<label naming
+   the batch>", the steps in order, save=true. It compiles every Blueprint it
+   touched and reports errors, so no separate compile or save call is needed.
+   A graph is one step: hf_edit_blueprint_graph inside the batch. Use separate
+   calls only where you must look at a result before deciding the next step.
+   The session already has a "session start" checkpoint ('checkpoint' calls
+   hf_set_checkpoint for you).
+2. Run anything left in order. Before a delete, rename or wide change, call it
    with preview=true and read what it would change. Every write reports what
    it verified: trust it, and stop on the first failure or UNKNOWN outcome.
    After UNKNOWN, read the current state before trying again.
@@ -245,7 +253,7 @@ KNOWN_TOOLS = frozenset({
 # The connector's own tools, which playbooks also name.
 GATEWAY_TOOLS = frozenset({
     "hf_bridge_status", "hf_search_tools", "hf_tool_schema", "hf_read",
-    "hf_write", "hf_destroy", "hf_api_lookup",
+    "hf_write", "hf_destroy", "hf_api_lookup", "hf_batch",
 })
 
 
@@ -291,13 +299,13 @@ TOOLKITS: dict[str, list[tuple[str, list[str]]]] = {
 }
 
 _TOOLKIT_HEAD = (
-    "Tools this stage usually needs, each as: caller tool {arguments}. Call "
+    "Tools this stage usually needs, each as: caller tool {argument:type}. Call "
     "them as hf_write {\"tool\": \"hf_add_state\", \"args\": {...}} - the "
-    "caller is the only tool name you call, never the tool's own. "
-    "? marks an optional argument, * one that takes a list or object whose form "
-    "hf_tool_schema shows. Call these straight away; search only for anything "
-    "not listed, and fetch hf_tool_schema only for an argument marked * that "
-    "you have not used before."
+    "caller is the only tool name you call, never the tool's own; inside "
+    "hf_batch a step names only the tool. "
+    "? marks an optional argument. Call these straight away; search only for "
+    "anything not listed, and fetch hf_tool_schema only for a list or obj "
+    "argument whose form you have not used before."
 )
 
 

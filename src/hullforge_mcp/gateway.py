@@ -45,6 +45,8 @@ NAMES = (SEARCH, SCHEMA, READ, WRITE, DESTROY)
 # Looks up the Unreal Engine API itself, not the editor's tools. Needs no
 # editor, so it is dispatched apart from NAMES. See api_index.py.
 LOOKUP = "hf_api_lookup"
+# Several calls in one round-trip; dispatched apart from NAMES. See server.py.
+BATCH = "hf_batch"
 
 # Claude Code loads these tools' schemas up front rather than behind its own
 # tool search. Five small schemas are cheaper than a search round-trip to find
@@ -440,6 +442,12 @@ _PREVIEW = {"preview": {
                     "can reverse; for the rest it says so and runs nothing.")}}
 
 
+_VERBOSE = {"verbose": {
+    "type": "boolean", "default": False,
+    "description": "Return the full report (what was and was not checked, touched packages). "
+                   "By default a success comes back short; a failure always comes back in full."}}
+
+
 def _call_schema(extra: dict[str, Any] | None = None, required_extra: tuple[str, ...] = ()) -> dict[str, Any]:
     props: dict[str, Any] = {
         "tool": {"type": "string", "description": "The tool's exact name, as hf_search_tools returned it."},
@@ -522,7 +530,7 @@ TOOLS: list[types.Tool] = [
             "and reports whether it took. Destructive tools are refused here; use hf_destroy. "
             "Pass preview=true to see exactly what it would change first, with nothing changed."
         ),
-        input_schema=_call_schema(_PREVIEW),
+        input_schema=_call_schema({**_PREVIEW, **_VERBOSE}),
         annotations=types.ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True),
         meta=_ALWAYS_LOAD,
     ),
@@ -538,9 +546,46 @@ TOOLS: list[types.Tool] = [
         ),
         input_schema=_call_schema(
             {"confirm": {"type": "boolean", "description": "Must be true to destroy. Set it only for a deletion the user asked for. Not needed with preview=true."},
-             **_PREVIEW},
+             **_PREVIEW, **_VERBOSE},
         ),
         annotations=types.ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=True),
+        meta=_ALWAYS_LOAD,
+    ),
+    types.Tool(
+        name=BATCH,
+        title="Batch",
+        description=(
+            "Run several HullForge read and write calls in ONE request, in order: the "
+            "usual way to build something (create a Blueprint, add its components and "
+            "variables, set defaults, place it). A step can use an earlier step's result: "
+            "name a step with 'as', then write \"$name.field\" in a later argument (a "
+            "whole-string reference keeps the value's type). Stops at the first failure "
+            "and reports it in full; earlier steps stay applied, so give 'checkpoint' to "
+            "be able to roll back. Afterwards it compiles every Blueprint the steps "
+            "touched and reports any errors, and saves if 'save' is true. Destroying "
+            "tools are refused here: call them with hf_destroy."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "steps": {"type": "array", "minItems": 1, "maxItems": 40, "items": {
+                    "type": "object",
+                    "properties": {
+                        "tool": {"type": "string", "description": "A read or write tool's exact name."},
+                        "args": {"type": "object", "default": {}},
+                        "as": {"type": "string", "description": "Optional name for this step's result, for $name.field references."},
+                    },
+                    "required": ["tool"], "additionalProperties": False}},
+                "checkpoint": {"type": "string", "description": "Optional. Set a checkpoint with this label before the first step."},
+                "compile": {"type": "boolean", "default": True,
+                            "description": "Compile the Blueprints the steps touched and report their errors."},
+                "save": {"type": "boolean", "default": False, "description": "hf_save_all after the steps succeed."},
+                **_VERBOSE,
+            },
+            "required": ["steps"],
+            "additionalProperties": False,
+        },
+        annotations=types.ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False),
         meta=_ALWAYS_LOAD,
     ),
     types.Tool(

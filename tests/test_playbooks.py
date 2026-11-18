@@ -61,7 +61,7 @@ class TestContent:
         assert playbooks.KNOWN_TOOLS <= used
 
     def test_gateway_tools_are_the_listed_ones(self):
-        assert playbooks.GATEWAY_TOOLS == {"hf_bridge_status", *gateway.NAMES, gateway.LOOKUP}
+        assert playbooks.GATEWAY_TOOLS == {"hf_bridge_status", *gateway.NAMES, gateway.LOOKUP, gateway.BATCH}
 
     @pytest.mark.skipif(not _PLUGIN_SOURCE.is_dir(), reason="plugin source not beside the connector")
     def test_known_tools_exist_in_plugin(self):

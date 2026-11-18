@@ -179,6 +179,8 @@ class HullForgeServer:
         # Long notes a tool repeats on every call (not_checked, freshness...)
         # go out once per session; see _shrink_repeats.
         self._said: dict[str, str] = {}
+        # Set per call from 'verbose'; a successful write comes back short unless it is.
+        self._verbose = False
         self.server: Server = Server(
             "hullforge",
             version="0.1.0",
@@ -426,9 +428,15 @@ class HullForgeServer:
         props = (entry.schema or {}).get("properties") or {}
         required = list((entry.schema or {}).get("required") or [])
         def show(arg: str) -> str:
-            kind = (props.get(arg) or {}).get("type")
-            star = "*" if kind in ("array", "object") else ""
-            return arg + star + ("" if arg in required else "?")
+            spec = props.get(arg) or {}
+            kind = spec.get("type")
+            if isinstance(kind, list):
+                kind = next((k for k in kind if k != "null"), "any")
+            short = {"string": "str", "integer": "int", "number": "num", "boolean": "bool",
+                     "array": "list", "object": "obj"}.get(str(kind), "any")
+            if spec.get("enum") and len(spec["enum"]) <= 5:
+                short = "|".join(str(e) for e in spec["enum"])
+            return arg + ("" if arg in required else "?") + ":" + short
         names = required + [a for a in props if a not in required and a not in ("force",)]
         shown = [show(a) for a in names[:12]]
         if len(names) > 12:
@@ -437,6 +445,102 @@ class HullForgeServer:
         # hf_write" read as a tool of its own: a demo agent called
         # mcp__hullforge__hf_add_blueprint_variable and was refused.
         return f"{_gateway.caller_for(entry.kind)} {entry.name} {{{', '.join(shown)}}}"
+
+    async def _batch(self, args: dict[str, Any]) -> types.CallToolResult:
+        """hf_batch: several calls in one round-trip.
+
+        Measured on a demo take: 71 round-trips for one feature, each one
+        re-reading the whole conversation, and most of them a step that only
+        waited on the one before (create, then add, then set, then compile,
+        then save). Here they run back to back with no model turn between.
+        Every step goes through the same path as hf_read/hf_write, so the
+        schema check, the stage lock and the failure notes all still apply."""
+        steps = args.get("steps")
+        if not isinstance(steps, list) or not steps:
+            return _error("'steps' must be a non-empty list of {tool, args, as}. Nothing was changed.")
+        verbose = args.get("verbose") is True
+        named: dict[str, Any] = {}
+        report: list[dict[str, Any]] = []
+        touched: list[str] = []
+        failed: dict[str, Any] | None = None
+
+        label = args.get("checkpoint")
+        if isinstance(label, str) and label.strip():
+            cp = await self._gateway_invoke(_gateway.READ if self._kind("hf_set_checkpoint") == _gateway.READ_KIND
+                                            else _gateway.WRITE,
+                                            {"tool": "hf_set_checkpoint", "args": {"label": label.strip()}})
+            if cp.is_error:
+                return _error(f"The checkpoint could not be set, so no step was run: {_result_text(cp)}")
+
+        for i, step in enumerate(steps):
+            if not isinstance(step, dict) or not step.get("tool"):
+                failed = {"step": i, "error": "each step needs 'tool'."}
+                break
+            tool = str(step["tool"])
+            kind = self._kind(tool)
+            if kind == _gateway.DESTROY_KIND:
+                failed = {"step": i, "tool": tool,
+                          "error": f"'{tool}' destroys work, so it is not run in a batch: call it "
+                                   f"with hf_destroy on its own."}
+                break
+            try:
+                inner = _resolve_refs(step.get("args") or {}, named)
+            except KeyError as exc:
+                failed = {"step": i, "tool": tool, "error": f"reference {exc} names no earlier step "
+                          f"result. Names so far: {', '.join(named) or 'none'}."}
+                break
+            caller = _gateway.READ if kind == _gateway.READ_KIND else _gateway.WRITE
+            result = await self._gateway_invoke(caller, {"tool": tool, "args": inner, "verbose": verbose})
+            if result.is_error:
+                failed = {"step": i, "tool": tool, "error": _result_text(result)}
+                break
+            body = result.structured_content
+            if body is None:
+                try:
+                    body = json.loads(_result_text(result))
+                except ValueError:
+                    body = _result_text(result)
+            if step.get("as"):
+                named[str(step["as"])] = body
+            report.append({"step": i, "tool": tool, "result": body})
+            if tool == "hf_create_blueprint":
+                bp = (body.get("blueprint") if isinstance(body, dict) else None) or inner.get("destination")
+            else:
+                bp = inner.get("blueprint") if isinstance(inner, dict) else None
+            if isinstance(bp, str) and bp.startswith("/"):
+                bp = bp.split(".", 1)[0]
+                if bp not in touched and tool != "hf_compile_blueprint":
+                    touched.append(bp)
+
+        out: dict[str, Any] = {"ran": len(report), "of": len(steps), "steps": report}
+        if failed is not None:
+            out["failed"] = failed
+            out["not_run"] = len(steps) - len(report) - 1
+            out["note"] = ("Steps before the failure stayed applied. Fix the failing step and send "
+                           "it and the rest again" + (", or roll back to the checkpoint." if label else "."))
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=_compact(out))],
+                structured_content=out, is_error=True)
+
+        if args.get("compile", True) and touched and "hf_compile_blueprint" in self._index.entries:
+            compiled = {}
+            for bp in touched:
+                r = await self._gateway_invoke(_gateway.WRITE, {"tool": "hf_compile_blueprint", "args": {"blueprint": bp}})
+                b = r.structured_content or {}
+                errors = b.get("errors") if isinstance(b, dict) else None
+                compiled[bp] = ("failed: " + _result_text(r)[:400]) if r.is_error else (
+                    "ok" if not errors else {"errors": errors, "messages": b.get("messages")})
+            out["compiled"] = compiled
+        if args.get("save") is True and "hf_save_all" in self._index.entries:
+            r = await self._gateway_invoke(_gateway.WRITE, {"tool": "hf_save_all", "args": {}})
+            out["saved"] = "ok" if not r.is_error else _result_text(r)[:400]
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text=_compact(out))],
+            structured_content=out)
+
+    def _kind(self, tool: str) -> str | None:
+        entry = self._index.entries.get(tool)
+        return entry.kind if entry else None
 
     def _remember_session(self, ctx: Any) -> None:
         session = getattr(ctx, "session", None)
@@ -465,6 +569,14 @@ class HullForgeServer:
 
         if name == _gateway.LOOKUP:
             return await self._api_lookup(args)
+
+        if name == _gateway.BATCH:
+            if not len(self._index) or self._client is None or not self._client.connected:
+                try:
+                    await self._refresh_catalog()
+                except (SessionError, BridgeError) as exc:
+                    return _error(str(exc))
+            return await self._batch(args)
 
         if name == _gateway.SEARCH and args.get("playbook"):
             return self._playbook(args)
@@ -540,7 +652,7 @@ class HullForgeServer:
             # model structured_content, not the text, when both are present
             # (checked in a session transcript), so trimming only the text
             # trimmed nothing the agent read.
-            lean = self._lean(name, result)
+            lean = self._lean(name, result, terse=is_mutating and not self._verbose)
             structured = dict(lean) if isinstance(lean, dict) else {"result": lean}
             if deduplicated:
                 structured["deduplicated"] = True
@@ -782,6 +894,7 @@ class HullForgeServer:
         return "\n\n".join(lines)
 
     async def _gateway_invoke_inner(self, caller: str, args: dict[str, Any]) -> types.CallToolResult:
+        self._verbose = args.get("verbose") is True
         tool = str(args.get("tool") or "")
         inner = args.get("args") or {}
         if not isinstance(inner, dict):
@@ -912,10 +1025,19 @@ class HullForgeServer:
             ))
         return result
 
-    def _lean(self, name: str, result: Any) -> Any:
-        """What the agent reads: repeats shortened, then fitted to the budget."""
+    def _lean(self, name: str, result: Any, terse: bool = False) -> Any:
+        """What the agent reads: repeats shortened, then fitted to the budget.
+
+        TERSE for a successful write unless 'verbose' was asked for: the
+        caveats every write carries (what was not checked, the packages it
+        dirtied, undo and deprecation flags) averaged 600-2,000 characters a
+        call and were almost never acted on. Failures never get here - they
+        are errors, reported in full."""
         if isinstance(result, dict):
             result = {k: v for k, v in result.items() if k != "image_base64"}
+            if terse:
+                result = {k: v for k, v in result.items()
+                          if k not in _TERSE_DROP and not (v is False and k in _FALSE_IS_NEWS_ONLY_IF_TRUE)}
         return json.loads(_fit_json(self._shrink_repeats(name, result)))
 
     def _to_content(self, name: str, result: dict[str, Any], deduplicated: bool = False,
@@ -1105,7 +1227,7 @@ class HullForgeServer:
 
 
 # The tools listed beside the catalog, which are called directly.
-_TOP_LEVEL = {"hf_bridge_status", *_gateway.NAMES, _gateway.LOOKUP}
+_TOP_LEVEL = {"hf_bridge_status", *_gateway.NAMES, _gateway.LOOKUP, _gateway.BATCH}
 
 
 # Claude Code refuses a tool result over about 25,000 tokens and parks it in a
@@ -1122,6 +1244,47 @@ def _compact(value: Any) -> str:
     # rest of the session, re-read on every turn.
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
 
+
+_REF = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)((?:\.[A-Za-z0-9_]+)*)")
+
+
+def _resolve_refs(value: Any, named: dict[str, Any]) -> Any:
+    """Replace $name.field references with earlier step results (hf_batch).
+
+    A string that is ONLY a reference becomes the referenced value with its
+    type; a reference inside a longer string is spliced in as text. A name
+    that is not a step raises KeyError; anything else that merely starts with
+    '$' and names no step is left as written."""
+    def lookup(name: str, path: str) -> Any:
+        if name not in named:
+            raise KeyError(f"${name}")
+        v = named[name]
+        for part in [p for p in path.split(".") if p]:
+            if isinstance(v, dict) and part in v:
+                v = v[part]
+            elif isinstance(v, list) and part.isdigit() and int(part) < len(v):
+                v = v[int(part)]
+            else:
+                raise KeyError(f"${name}{path}")
+        return v
+    if isinstance(value, dict):
+        return {k: _resolve_refs(v, named) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_resolve_refs(v, named) for v in value]
+    if isinstance(value, str) and "$" in value:
+        whole = _REF.fullmatch(value)
+        if whole:
+            return lookup(whole.group(1), whole.group(2))
+        return _REF.sub(lambda m: str(lookup(m.group(1), m.group(2))), value)
+    return value
+
+
+# Dropped from a successful write's result unless 'verbose' (see _lean).
+_TERSE_DROP = {"not_checked", "freshness", "touched", "verification_note", "target_id_note",
+               "access_advice", "status_says_compiled", "transactional", "package_dirty",
+               "undoable", "instances_note", "property_type", "object_path", "generated_class"}
+# Flags that only say something when true.
+_FALSE_IS_NEWS_ONLY_IF_TRUE = {"deprecated", "changed", "deduplicated"}
 
 # Keys whose text is the answer itself, never boilerplate.
 _NEVER_SHRINK = {"error", "message", "text", "value", "value_text", "before", "after",
