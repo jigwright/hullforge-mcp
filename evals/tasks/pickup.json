@@ -7,6 +7,6 @@
   ],
   "cleanup": [
     {"tool": "hf_delete_actor", "args": {"actor": "EvalPickup"}},
-    {"tool": "hf_delete_asset", "args": {"object": "/Game/Eval/BP_EvalPickup"}}
+    {"tool": "hf_delete_asset", "args": {"object": "/Game/Eval/BP_EvalPickup", "delete_referenced": true}}
   ]
 }
