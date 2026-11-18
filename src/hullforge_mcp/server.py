@@ -37,6 +37,7 @@ from . import gateway as _gateway
 from . import focus as _focus
 from . import crash as _crash
 from . import playbooks as _playbooks
+from . import codemode as _codemode
 from .friction import FrictionLog
 from mcp.shared.exceptions import MCPError
 from .session import (
@@ -579,6 +580,11 @@ class HullForgeServer:
         else:
             out["steps"] = run.report
 
+        return await self._after_run(run, args, out)
+
+    async def _after_run(self, run: "_BatchRun", args: dict[str, Any], out: dict[str, Any]) -> types.CallToolResult:
+        """What hf_batch and hf_run_code do once their steps succeed: compile
+        what they touched, save if asked."""
         if args.get("compile", True) and run.touched and "hf_compile_blueprint" in self._index.entries:
             compiled = {}
             for bp in run.touched:
@@ -597,6 +603,61 @@ class HullForgeServer:
         return types.CallToolResult(
             content=[types.TextContent(type="text", text=_compact(out))],
             structured_content=out)
+
+    async def _run_code(self, args: dict[str, Any]) -> types.CallToolResult:
+        """hf_run_code: a Starlark script whose tool calls are batch steps.
+        See codemode.py for the sandbox; every call is _run_tool_step, so it
+        gets hf_batch's checks and refusals exactly."""
+        run = _BatchRun(verbose=False)
+        label = args.get("checkpoint")
+        if isinstance(label, str) and label.strip():
+            cp = await self._gateway_invoke(_gateway.READ if self._kind("hf_set_checkpoint") == _gateway.READ_KIND
+                                            else _gateway.WRITE,
+                                            {"tool": "hf_set_checkpoint", "args": {"label": label.strip()}})
+            if cp.is_error:
+                return _error(f"The checkpoint could not be set, so the script did not run: {_result_text(cp)}")
+
+        async def handle(kind: str, msg: dict[str, Any]) -> tuple[bool, Any]:
+            if kind == "search":
+                r = self._gateway_search({"query": str(msg.get("query") or ""),
+                                          "limit": max(1, min(int(msg.get("limit") or 5), 10))})
+                body = r.structured_content or {}
+                return (not r.is_error), (body.get("results") if isinstance(body, dict) else body) if not r.is_error \
+                    else _result_text(r)
+            tool = str(msg.get("tool") or "")
+            want = _gateway.READ_KIND if kind == "read" else _gateway.WRITE_KIND
+            have = self._kind(tool) or (_gateway.WRITE_KIND if tool == _gateway.NOTES else None)
+            if have == _gateway.READ_KIND and want == _gateway.WRITE_KIND:
+                want = _gateway.READ_KIND  # a read through write() is harmless; run it as a read
+            if have is not None and have != want and have != _gateway.DESTROY_KIND:
+                return False, f"'{tool}' changes the project, so call it with write(), not read()."
+            step = {"tool": tool, "args": msg.get("args") or {}, "raw": True}
+            before = len(run.report)
+            await self._run_tool_step(step, run, str(run.ran))
+            if run.failed is not None:
+                err = str(run.failed.get("error") or "failed")
+                run.failed = None
+                return False, err
+            return True, run.report[before]["result"] if len(run.report) > before else None
+
+        res = await _codemode.run(str(args.get("code") or ""), handle,
+                                  seconds=float(args.get("seconds") or _codemode.DEFAULT_SECONDS))
+        out: dict[str, Any] = {"calls": res.get("calls", 0)}
+        if res.get("logs"):
+            out["logs"] = res["logs"]
+        if "error" in res:
+            out["error"] = res["error"]
+            if run.report:
+                out["note"] = (f"{len(run.report)} tool call(s) ran before this and stayed applied"
+                               + (", or roll back to the checkpoint." if label else "."))
+            return types.CallToolResult(content=[types.TextContent(type="text", text=_compact(out))],
+                                        structured_content=out, is_error=True)
+        out["result"] = res.get("result")
+        text = _compact(out)
+        if len(text) > 20000:
+            out["result"] = text[:20000]
+            out["note"] = "The result was over 20,000 characters and was cut; return less."
+        return await self._after_run(run, args, out)
 
     async def _run_steps(self, steps: list[Any], run: "_BatchRun", prefix: str, depth: int) -> None:
         if depth > 4:
@@ -656,7 +717,9 @@ class HullForgeServer:
                                    f"with hf_destroy on its own."}
             return
         try:
-            inner = _resolve_refs(step.get("args") or {}, run.named)
+            # A script's arguments are values it built itself; a "$x" string in
+            # them is text, not a reference.
+            inner = (step.get("args") or {}) if step.get("raw") else _resolve_refs(step.get("args") or {}, run.named)
         except _BadRef as exc:
             run.failed = {"step": where, "tool": tool, "error": f"bad reference: {exc}. Nothing in this step was run."}
             return
@@ -786,6 +849,14 @@ class HullForgeServer:
                 except (SessionError, BridgeError) as exc:
                     return _error(str(exc))
             return _ensure_structured(await self._batch(args))
+
+        if name == _gateway.CODE:
+            if not len(self._index) or self._client is None or not self._client.connected:
+                try:
+                    await self._refresh_catalog()
+                except (SessionError, BridgeError) as exc:
+                    return _error(str(exc))
+            return _ensure_structured(await self._run_code(args))
 
         if name == _gateway.RESTART:
             return _ensure_structured(await self._restart_editor(args))
@@ -1784,7 +1855,8 @@ class HullForgeServer:
 
 
 # The tools listed beside the catalog, which are called directly.
-_TOP_LEVEL = {"hf_bridge_status", *_gateway.NAMES, _gateway.LOOKUP, _gateway.BATCH, _gateway.RESTART}
+_TOP_LEVEL = {"hf_bridge_status", *_gateway.NAMES, _gateway.LOOKUP, _gateway.BATCH, _gateway.CODE,
+              _gateway.RESTART}
 
 # The tools the stage playbooks name, also listed under their own names as
 # DEFERRED tools (Claude Code loads one only when it is about to call it), so a

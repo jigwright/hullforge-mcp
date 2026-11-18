@@ -50,6 +50,9 @@ BATCH = "hf_batch"
 # Save, close, rebuild, reopen and reconnect the editor. Top-level so a
 # client's permission rules can ask before it like before hf_destroy.
 RESTART = "hf_restart_editor"
+# A Starlark script whose tool calls go through hf_read/hf_write's checks.
+# See codemode.py.
+CODE = "hf_run_code"
 # Stage handoff notes, handled by the connector (not the editor), called
 # through hf_write (save) and hf_read (read).
 NOTES = "hf_stage_notes"
@@ -75,7 +78,10 @@ INSTRUCTIONS = (
     "full schema when a list or object argument's form is unclear. "
     "Use hf_batch for a run of steps: each step can use an earlier result as "
     "$name.field, and foreach, if, assert, select and return keep checks inside "
-    "the one call. Send independent calls together in one message. "
+    "the one call. When the work needs real logic (loops over what a read "
+    "returned, arithmetic, filtering a big result down), hf_run_code runs a short "
+    "Starlark script whose calls go through the same checks, and only its result "
+    "comes back. Send independent calls together in one message. "
     "Compiles and playtests wait for their result: never poll. "
     "hf_source_write takes 'files' to write many source files and compile them "
     "in one call. When a C++ change cannot load (restart_required, a new module "
@@ -592,6 +598,46 @@ TOOLS: list[types.Tool] = [
                 **_VERBOSE,
             },
             "required": ["steps"],
+            "additionalProperties": False,
+        },
+        annotations=types.ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=False),
+        meta=_ALWAYS_LOAD,
+    ),
+    types.Tool(
+        name=CODE,
+        title="Run Code",
+        description=(
+            "Run a short Starlark script (Python syntax, no import, no while, no files "
+            "or network) that calls HullForge, and get back only its result: the last "
+            "expression's value. Use it over hf_batch when the work needs logic: loop "
+            "over what a read returned, compute positions, build names, filter a large "
+            "result to the few fields you need. Functions: read(tool, args) and "
+            "write(tool, args) call an operation exactly as hf_read/hf_write would and "
+            "return its result (a failure stops the script with the tool's message; "
+            "pass check=False to get {\"error\": ...} back instead), search(query) "
+            "returns matching operations with their arguments, log(...) records a line, "
+            "json.encode/json.decode, map and filter. Tool calls that fail validation "
+            "or the stage lock are refused as usual; destroying tools are refused (use hf_destroy), and so "
+            "can a tool that needs the user's approval (call it on its own). At most "
+            "200 tool calls; the script's own time is capped (tool calls do not count) "
+            "and its memory is capped. Afterwards it compiles every Blueprint and C++ "
+            "file the script touched, like hf_batch. Example: "
+            "a = read(\"hf_list_actors\", {\"class_filter\": \"StaticMeshActor\"})"
+            "[\"actors\"]; [x[\"name\"] for x in a if x[\"location\"][\"z\"] < 0]"
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "maxLength": 20000,
+                         "description": "The Starlark script. Its last expression is the result."},
+                "seconds": {"type": "number", "minimum": 0.5, "maximum": 60, "default": 10,
+                            "description": "The script's own time limit, not counting tool calls."},
+                "checkpoint": {"type": "string", "description": "Optional. Set a checkpoint with this label first."},
+                "compile": {"type": "boolean", "default": True,
+                            "description": "Compile the Blueprints and C++ files the script touched and report errors."},
+                "save": {"type": "boolean", "default": False, "description": "hf_save_all after the script succeeds."},
+            },
+            "required": ["code"],
             "additionalProperties": False,
         },
         annotations=types.ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=False),

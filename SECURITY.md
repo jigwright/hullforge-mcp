@@ -8,8 +8,8 @@ stops it doing harm, and what you should set up.
 | Call | Who approves |
 |---|---|
 | `hf_read`, `hf_search_tools`, `hf_tool_schema`, `hf_api_lookup`, `hf_bridge_status` | Nobody: they change nothing. |
-| `hf_write`, `hf_batch` | Your client's permission rules. Every write is verified by reading it back, has a checkpoint to roll back to, and can be previewed (`preview=true`). |
-| `hf_destroy` (delete, overwrite, revert) | **You.** When your client supports MCP elicitation (Claude Code does), HullForge asks you directly; the model cannot answer for you. Clients without elicitation fall back to `confirm=true`, which the model can set, so for those keep `hf_destroy` on "ask" in the client. |
+| `hf_write`, `hf_batch`, `hf_run_code` | Your client's permission rules. Every write is verified by reading it back, has a checkpoint to roll back to, and can be previewed (`preview=true`). |
+| `hf_destroy` (delete, overwrite, revert) | **You.** When your client supports MCP elicitation (Claude Code does), HullForge asks you directly; the model cannot answer for you. On the 2026-07-28 protocol the question comes back as `input_required` and your client asks you before calling again; the answer is sealed to that one call. Clients without elicitation fall back to `confirm=true`, which the model can set, so for those keep `hf_destroy` on "ask" in the client. |
 | `hf_source_add_dependency`, `hf_source_add_module` (change how the project builds) | **You**, the same way. |
 | `hf_restart_editor` | **You.** It saves first and never kills the editor. |
 
@@ -19,6 +19,12 @@ Recommended Claude Code permissions: `docs/claude-code-settings.json`.
 
 * Console commands, Python and other "run this string" channels are not
   exposed. C++ goes through the source tools only.
+* `hf_run_code` runs a Starlark script, not Python: the language has no
+  import, `while`, files, network, clock or recursion. It runs in its own
+  process, capped at 512 MB and stopped past its time limit, and can reach
+  nothing but HullForge calls, each checked exactly as a model's
+  `hf_read`/`hf_write` call is. Destroying tools and tools that need your
+  approval are refused inside a script.
 * Source tools write only inside the project's own source folders (never
   engine source, other plugins or HullForge itself), refuse paths through
   symbolic links or junctions, back every file up first

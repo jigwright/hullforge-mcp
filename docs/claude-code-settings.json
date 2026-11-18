@@ -8,7 +8,8 @@
       "mcp__hullforge__hf_api_lookup",
       "mcp__hullforge__hf_read",
       "mcp__hullforge__hf_write",
-      "mcp__hullforge__hf_batch"
+      "mcp__hullforge__hf_batch",
+      "mcp__hullforge__hf_run_code"
     ],
     "ask": [
       "mcp__hullforge__hf_destroy",
