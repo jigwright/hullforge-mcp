@@ -205,6 +205,25 @@ class Entry:
 _WEIGHTS = {"name": 3.0, "area": 1.5, "summary": 2.0, "body": 0.6}
 
 
+def slim_schema(schema: Any) -> Any:
+    """The schema as the agent reads it: the same arguments, less repeated prose.
+
+    Every write tool shares a 'force' argument with a 300-character
+    description, and a demo session read it thirty times. Validation still
+    runs against the full schema; this copy is only what is shown.
+    """
+    if not isinstance(schema, dict):
+        return schema
+    props = schema.get("properties")
+    if not isinstance(props, dict) or "force" not in props:
+        return schema
+    slim = dict(schema)
+    slim["properties"] = {**props, "force": {
+        "type": "boolean", "default": False,
+        "description": "Edit even when the asset cannot be saved right now (e.g. not checked out)."}}
+    return slim
+
+
 def call_example(entry: "Entry") -> str:
     """The exact call to make, with the required arguments as placeholders.
 

@@ -35,7 +35,12 @@ _COMMON = (
     "10 per call), then call each through hf_read, hf_write or hf_destroy as its "
     "'call' line shows - never by its own name. Never guess arguments. Prefer the "
     "batch forms: hf_edit_blueprint_graph for a whole graph, hf_set_property with "
-    "'properties' for several values. If hf_bridge_status says no editor is "
+    "'properties' for several values. Calls that do not depend on each other "
+    "(several reads, several independent writes) go out together in one "
+    "message, not one per turn: every turn re-reads the whole conversation. "
+    "Look before searching: tools named in this playbook need no search. "
+    "List calls take a filter; ask for what you need, not everything. "
+    "If hf_bridge_status says no editor is "
     "connected, ask the user to open their Unreal project and stop there."
 )
 

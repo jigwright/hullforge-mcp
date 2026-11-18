@@ -176,6 +176,9 @@ class HullForgeServer:
         # the stage, writes are refused; loading build or verify lifts it.
         self._stage: str | None = None
         self._failures: dict[tuple[str, str], tuple[int, str]] = {}
+        # Long notes a tool repeats on every call (not_checked, freshness...)
+        # go out once per session; see _shrink_repeats.
+        self._said: dict[str, str] = {}
         self.server: Server = Server(
             "hullforge",
             version="0.1.0",
@@ -597,7 +600,8 @@ class HullForgeServer:
         if isinstance(queries, list) and queries:
             parts, rows = [], []
             for q in [str(x) for x in queries[:10] if str(x).strip()]:
-                one = self._gateway_search({**{k: v for k, v in args.items() if k != "queries"}, "query": q})
+                one = self._gateway_search({**{k: v for k, v in args.items() if k != "queries"},
+                                            "query": q, "_default_limit": 4})
                 parts.append(f"## {q}\n{_result_text(one)}")
                 for r in (one.structured_content or {}).get("results", []):
                     rows.append({**r, "query": q})
@@ -606,7 +610,10 @@ class HullForgeServer:
                 structured_content={"results": rows},
             )
         query = str(args.get("query") or "").strip()
-        limit = max(1, min(int(args.get("limit") or 8), 25))
+        # FIVE BY DEFAULT, FOUR EACH WHEN SEVERAL QUERIES ARE ASKED AT ONCE.
+        # Search results stay in context; the eighth hit for a need is almost
+        # never the one called.
+        limit = max(1, min(int(args.get("limit") or args.get("_default_limit") or 5), 25))
         kind = args.get("kind") or None
         area = None
         if args.get("area"):
@@ -649,11 +656,8 @@ class HullForgeServer:
                  "required": _gateway.required_args(e), "summary": e.summary} for _, e in hits]
         lines = [header]
         for r in rows:
-            lines.append(f"- {r['name']}  [{r['area']} | {r['kind']} -> {r['call_with']}]\n"
-                         f"    {r['summary']}\n"
-                         f"    call: {r['call']}")
-            for arg, about in r["required"].items():
-                lines.append(f"    required {arg} ({about})")
+            # The call line already carries the required arguments.
+            lines.append(f"- {r['name']}: {r['summary']}\n  call: {r['call']}")
         return types.CallToolResult(
             content=[types.TextContent(type="text", text="\n".join(lines))],
             structured_content={"results": rows},
@@ -680,10 +684,10 @@ class HullForgeServer:
                 "call_with": _gateway.caller_for(entry.kind),
                 "call": _gateway.call_example(entry),
                 "description": entry.description,
-                "input_schema": entry.schema,
+                "input_schema": _gateway.slim_schema(entry.schema),
             })
         return types.CallToolResult(
-            content=[types.TextContent(type="text", text=json.dumps(out, indent=2))],
+            content=[types.TextContent(type="text", text=_compact(out))],
             structured_content={"tools": out},
         )
 
@@ -798,7 +802,7 @@ class HullForgeServer:
             return _error(
                 f"Arguments for '{tool}' don't match its schema, so nothing was sent "
                 f"to the editor:\n- " + "\n- ".join(problems)
-                + f"\n\nSchema for {tool}:\n{json.dumps(entry.schema, indent=2)}"
+                + f"\n\nSchema for {tool}:\n{_compact(_gateway.slim_schema(entry.schema))}"
             )
 
         if preview:
@@ -880,8 +884,7 @@ class HullForgeServer:
             ))
         return result
 
-    @staticmethod
-    def _to_content(name: str, result: dict[str, Any], deduplicated: bool = False) -> list[Any]:
+    def _to_content(self, name: str, result: dict[str, Any], deduplicated: bool = False) -> list[Any]:
         """Turn a tool result into MCP content blocks.
 
         A tool that returns image_base64 gets a real ImageContent block. This is
@@ -901,7 +904,7 @@ class HullForgeServer:
 
         image_b64 = result.get("image_base64")
         if isinstance(image_b64, str) and image_b64:
-            meta = {k: v for k, v in result.items() if k != "image_base64"}
+            meta = self._shrink_repeats(name, {k: v for k, v in result.items() if k != "image_base64"})
             blocks: list[Any] = [
                 types.ImageContent(
                     type="image",
@@ -911,10 +914,38 @@ class HullForgeServer:
             ]
             if meta:
                 blocks.append(types.TextContent(
-                    type="text", text=json.dumps(meta, indent=2) + note))
+                    type="text", text=_compact(meta) + note))
             return blocks
 
-        return [types.TextContent(type="text", text=_fit_json(result) + note)]
+        return [types.TextContent(type="text", text=_fit_json(self._shrink_repeats(name, result)) + note)]
+
+    def _shrink_repeats(self, tool: str, result: Any) -> Any:
+        """Send each long, repeated note once per session.
+
+        Measured on a demo session: every write result re-sent the same
+        paragraphs (what was not checked, what a dirty Blueprint means, the
+        'force' advice), about 34,000 characters of repeats, and every one of
+        them stays in the agent's context for the rest of the session. The
+        first copy is kept; later ones point back to it. Short values,
+        errors and anything the agent could act on differently are never
+        touched, because only strings over 160 characters seen before, word
+        for word, are replaced."""
+        if isinstance(result, dict):
+            out: dict[str, Any] = {}
+            for k, v in result.items():
+                if isinstance(v, str) and len(v) > 160 and k not in _NEVER_SHRINK:
+                    first = self._said.get(v)
+                    if first is None:
+                        self._said[v] = f"{k} of {tool}"
+                        out[k] = v
+                    else:
+                        out[k] = f"(same as the {first} earlier)"
+                else:
+                    out[k] = self._shrink_repeats(tool, v)
+            return out
+        if isinstance(result, list):
+            return [self._shrink_repeats(tool, x) for x in result]
+        return result
 
     def _bridge_status(self) -> types.CallToolResult:
         """Answerable with no editor running - that is the entire point."""
@@ -1045,14 +1076,23 @@ _TOP_LEVEL = {"hf_bridge_status", *_gateway.NAMES, _gateway.LOOKUP}
 # did that on camera. So every result is fitted to a budget here, once, for
 # all 3,000 tools: compact JSON first, then the longest lists trimmed, saying
 # exactly what was left out and how to get the rest.
-RESULT_CHAR_BUDGET = 24000
+RESULT_CHAR_BUDGET = 12000
+
+
+def _compact(value: Any) -> str:
+    # NO INDENTATION. Pretty-printed JSON spent about a third of every result
+    # on whitespace, and every result stays in the agent's context for the
+    # rest of the session, re-read on every turn.
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+
+
+# Keys whose text is the answer itself, never boilerplate.
+_NEVER_SHRINK = {"error", "message", "text", "value", "value_text", "before", "after",
+                 "source", "content", "code", "log", "lines", "path", "name"}
 
 
 def _fit_json(result: Any, budget: int = RESULT_CHAR_BUDGET) -> str:
-    text = json.dumps(result, indent=2)
-    if len(text) <= budget:
-        return text
-    text = json.dumps(result, separators=(",", ":"))
+    text = _compact(result)
     if len(text) <= budget or not isinstance(result, dict):
         return text
     fitted = dict(result)
