@@ -36,6 +36,32 @@ Recommended Claude Code permissions: `docs/claude-code-settings.json`.
   not accepted by you.
 * Source edits are off until you turn on **Allow source edits** for the project.
 
+## Paid generation (Meshy, ElevenLabs, ...)
+
+* **Off until you turn it on**, in Editor Preferences > Plugins > HullForge
+  Generation. These settings are yours: saved in your own Windows profile
+  (`%LOCALAPPDATA%\HullForge\generation-settings.json`), not in any project
+  config, so no project, commit or "Set as Default" can switch them on for you
+  or anyone else.
+* **API keys** are typed into masked fields on that page. Each is encrypted with
+  Windows DPAPI to your Windows account (`%LOCALAPPDATA%\HullForge\provider-keys.json`)
+  and the field empties. A key is never written to an .ini, never shown again
+  (only its last four characters), and never sent to the connector or the
+  model: the editor itself makes the calls. Anything running as your Windows
+  user can decrypt it, as with any per-user secret store; another user, or the
+  file copied elsewhere, cannot.
+* **No tool can change any of this.** Every tool call is wrapped by a guard
+  that puts back any change to these settings and refuses the call, and the
+  key store refuses writes while a tool runs.
+* **Each generation** checks the switch, the key and your daily cap, and by
+  default asks you in an editor dialog that names the service, what it makes
+  and the prompt. Requests go only over HTTPS to the service's own hosts;
+  downloads must come from them, stay under a size cap and be the expected file
+  type. Images are uploaded only from inside the project folder.
+* **Provenance**: every generated asset is recorded with the service, model,
+  prompt and date in `HullForge/generated-assets.json` in the project, for
+  AI-content disclosures.
+
 ## Transport
 
 * The editor side listens on 127.0.0.1 only, rejects any non-loopback peer,

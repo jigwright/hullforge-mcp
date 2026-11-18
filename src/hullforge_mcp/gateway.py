@@ -94,6 +94,9 @@ INSTRUCTIONS = (
     "For a whole task use the playbooks in order (design, plan, build, verify), "
     "as this server's prompts or hf_search_tools playbook=<stage>; each stage "
     "saves a handoff with hf_stage_notes so the next can start fresh. "
+    "hf_generate_3d and hf_generate_audio make meshes and sounds with paid "
+    "services the user set up (hf_generation_status); each is charged to them, "
+    "so use them only for assets the user wants generated. "
     "hf_api_lookup answers how the engine does something. If no editor is "
     "connected, hf_bridge_status says what to do."
 )

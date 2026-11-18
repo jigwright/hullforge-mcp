@@ -78,7 +78,10 @@ until the build stage. Read, look and ask.
    ones here, not later.
 4. Write the design back to the user:
    - what already exists and will be reused, by asset path or actor label;
-   - what is new: assets, actors, Blueprints, input, UI;
+   - what is new: assets, actors, Blueprints, input, UI; for new meshes,
+     sounds, voice lines or music that could be generated rather than built
+     from primitives, hf_generation_status says which paid services the user
+     set up; propose them (what, with which service), never assume them;
    - the acceptance checks from step 3;
    - risks: anything that deletes, renames, or touches many assets.
    Ask for a yes before planning work that deletes or reworks existing content.
@@ -265,6 +268,7 @@ KNOWN_TOOLS = frozenset({
     "hf_set_checkpoint", "hf_list_checkpoints", "hf_rollback_to_checkpoint",
     "hf_compile_blueprint", "hf_list_blueprint_errors", "hf_save_all",
     "hf_find_references", "hf_pie_get_log", "hf_pie_read", "hf_pie_capture", "hf_pie_read_ui",
+    "hf_generation_status",
     "hf_start_pie", "hf_stop_pie", "hf_pie_inject_input", "hf_pie_watch",
     "hf_source_modules", "hf_source_new_class", "hf_source_read", "hf_source_patch",
     "hf_source_add_dependency", "hf_source_compile", "hf_get_compile",
