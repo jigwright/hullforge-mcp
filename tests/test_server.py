@@ -216,7 +216,7 @@ class TestCatalog:
         result = await srv._handle_list_tools(None, None)
         # The status tool EXPLAINS an absent editor, and the gateway is there
         # from the start, so a client that reads the list once never misses it.
-        assert [t.name for t in result.tools] == ["hf_bridge_status", *gateway.NAMES, gateway.BATCH, gateway.RESTART, gateway.LOOKUP]
+        assert [t.name for t in result.tools][:len(gateway.NAMES) + 4] == ["hf_bridge_status", *gateway.NAMES, gateway.BATCH, gateway.RESTART, gateway.LOOKUP]
 
     async def test_catalog_is_not_cached_across_calls(self, wired):
         # HullForge.Reload can change the catalog at any moment, so a stale

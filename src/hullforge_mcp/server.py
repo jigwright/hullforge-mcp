@@ -380,7 +380,7 @@ class HullForgeServer:
         # editor holds. Clients that read the list once (Claude Desktop and
         # Claude Code do) would otherwise be stuck with whatever they saw
         # first. The editor's own tools are reached through the gateway.
-        return types.ListToolsResult(tools=[_BRIDGE_STATUS_TOOL, *_gateway.TOOLS])
+        return types.ListToolsResult(tools=[_BRIDGE_STATUS_TOOL, *_gateway.TOOLS, *_ALIAS_TOOLS])
 
     async def _handle_list_prompts(self, ctx: Any, params: Any) -> types.ListPromptsResult:
         return types.ListPromptsResult(prompts=_playbooks.list_prompts())
@@ -678,6 +678,24 @@ class HullForgeServer:
 
         if name in _gateway.NAMES:
             return _ensure_structured(await self._gateway_call(name, args))
+
+        if name in _ALIASES:
+            # AN INNER TOOL CALLED BY ITS OWN NAME. Agents kept doing this
+            # however the instructions were worded, and Claude Code refused the
+            # call before it reached HullForge. The most used tools are listed
+            # as deferred aliases; each runs through the same caller its risk
+            # tier needs, so the stage lock, schema check and human approval
+            # all still apply. Destroying tools are never aliased.
+            if not len(self._index) or self._client is None or not self._client.connected:
+                try:
+                    await self._refresh_catalog()
+                except (SessionError, BridgeError) as exc:
+                    return _error(str(exc))
+            kind = self._kind(name)
+            if kind == _gateway.DESTROY_KIND or kind is None:
+                return _error(f"'{name}' is not called directly; use hf_destroy. Nothing was changed.")
+            caller = _gateway.READ if kind == _gateway.READ_KIND else _gateway.WRITE
+            return _ensure_structured(await self._gateway_call(caller, {"tool": name, "args": args}))
 
         # Not listed, so not callable. The remedy is named rather than the call
         # quietly routed, so that a client's permission rules for hf_read,
@@ -1204,22 +1222,32 @@ class HullForgeServer:
                 pass
         self._client = None
         engine_root = Path(exe).parents[3]
-        build_bat = engine_root / "Build" / "BatchFiles" / "Build.bat"
-        if target and build_bat.exists() and args.get("build", True):
+        ubt = engine_root / "Binaries" / "DotNET" / "UnrealBuildTool" / "UnrealBuildTool.dll"
+        dotnets = sorted((engine_root / "Binaries" / "ThirdParty" / "DotNet").glob("*/win-x64/dotnet.exe"))
+        if target and ubt.exists() and dotnets and args.get("build", True):
             t0 = time.monotonic()
+            # THE ENGINE'S OWN UnrealBuildTool, run directly with its bundled
+            # .NET, as hf_source_compile does: no batch file and no shell. A
+            # cmd /c launch broke on the space in "C:\Program Files" ("'C:\Program'
+            # is not recognized"), the build never ran, and the editor came
+            # back with the old DLL.
             proc = await asyncio.create_subprocess_exec(
-                "cmd.exe", "/c", str(build_bat), target, "Win64", "Development",
+                str(dotnets[-1]), str(ubt), target, "Win64", "Development",
                 f"-Project={uproject}", "-WaitMutex",
+                cwd=str(ubt.parent),
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
             raw, _ = await asyncio.wait_for(proc.communicate(), timeout=1800)
             text = raw.decode("utf-8", "replace")
             errors = [ln.strip() for ln in text.splitlines() if ": error" in ln or "error LNK" in ln][:20]
-            steps["build"] = {"ok": proc.returncode == 0, "seconds": round(time.monotonic() - t0, 1),
-                              "errors": errors}
-            if proc.returncode != 0:
+            ok = proc.returncode == 0 and "Result: Succeeded" in text
+            steps["build"] = {"ok": ok, "seconds": round(time.monotonic() - t0, 1), "errors": errors}
+            if not ok:
                 return _error("The build failed, so the editor was NOT reopened (it would only offer "
                               "to rebuild). Fix these and call hf_restart_editor again:\n"
                               + "\n".join(errors or text.splitlines()[-15:]))
+        elif args.get("build", True):
+            return _error("Could not find this engine's UnrealBuildTool or its .NET, so nothing was "
+                          "built and the editor was not reopened.")
         subprocess.Popen([exe, str(uproject)], creationflags=0x00000008 | 0x00000200,
                          close_fds=True)
         deadline = time.monotonic() + 300
@@ -1618,6 +1646,25 @@ class HullForgeServer:
 
 # The tools listed beside the catalog, which are called directly.
 _TOP_LEVEL = {"hf_bridge_status", *_gateway.NAMES, _gateway.LOOKUP, _gateway.BATCH, _gateway.RESTART}
+
+# The tools the stage playbooks name, also listed under their own names as
+# DEFERRED tools (Claude Code loads one only when it is about to call it), so a
+# direct call by name works instead of being refused by the client.
+_ALIASES = tuple(dict.fromkeys(
+    t for groups in _playbooks.TOOLKITS.values() for _, ts in groups for t in ts
+    if t not in ("hf_rollback_to_checkpoint",)))  # destroys work: hf_destroy only
+_ALIAS_TOOLS = [
+    types.Tool(
+        name=_name,
+        description=(f"HullForge {_name}. Same as hf_read/hf_write {{\"tool\": \"{_name}\", \"args\": {{...}}}}; "
+                     f"the arguments are this tool's own (hf_tool_schema shows them)."),
+        input_schema={"type": "object", "additionalProperties": True},
+        output_schema={"type": "object"},
+        annotations=types.ToolAnnotations(destructive_hint=False, open_world_hint=False),
+        meta={"anthropic/alwaysLoad": False, "anthropic/searchHint": _name.removeprefix("hf_").replace("_", " ")},
+    )
+    for _name in _ALIASES
+]
 
 # Tools the stage lock lets through: they record the handoff, not project changes.
 _NOTE_TOOLS = frozenset({"hf_stage_notes", "hf_add_project_note", "hf_create_plan", "hf_update_plan"})

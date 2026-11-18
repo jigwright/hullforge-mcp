@@ -240,3 +240,23 @@ class TestHygiene:
         srv, _, _ = gw2
         r = await call(srv, "hf_bridge_status")
         assert r.structured_content["definitions_sha256"] == gateway.definitions_sha256()
+
+
+class TestAliases:
+    async def test_aliases_are_deferred_and_never_destroy(self, gw2):
+        srv, _, _ = gw2
+        tools = (await srv._handle_list_tools(None, None)).tools
+        aliases = [t for t in tools if t.name in server_mod._ALIASES]
+        assert aliases and all((t.meta or {}).get("anthropic/alwaysLoad") is False for t in aliases)
+        assert "hf_rollback_to_checkpoint" not in server_mod._ALIASES
+
+    async def test_a_direct_call_runs_through_the_gateway(self, gw2, monkeypatch):
+        srv, editor, _ = gw2
+        monkeypatch.setattr(server_mod, "_ALIASES", ("hf_set_actor_visibility", "hf_delete_actor"))
+        r = await call(srv, "hf_set_actor_visibility", {"actor": "Rock"})
+        assert not r.is_error and sent(editor, "hf_set_actor_visibility")
+        await call(srv, "hf_search_tools", {"playbook": "design"})
+        r = await call(srv, "hf_set_actor_visibility", {"actor": "Rock"})
+        assert r.is_error and "design stage" in r.content[0].text  # the stage lock still applies
+        r = await call(srv, "hf_delete_actor", {"actor": "Rock"})
+        assert r.is_error and len(sent(editor, "hf_delete_actor")) == 0
