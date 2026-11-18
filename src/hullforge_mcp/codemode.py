@@ -148,6 +148,13 @@ async def run(code: str, handler: Handler, *, seconds: float = DEFAULT_SECONDS) 
         if proc.returncode is None:
             proc.kill()
             await proc.wait()
+        # Read the pipe to its end so its transport closes now, not at
+        # garbage collection (an 'unclosed transport' warning on Windows).
+        if proc.stdout is not None:
+            try:
+                await asyncio.wait_for(proc.stdout.read(), timeout=2.0)
+            except Exception:  # noqa: BLE001 - only tidying up
+                pass
         if job is not None:
             import win32api
             win32api.CloseHandle(job)

@@ -119,7 +119,10 @@ Nothing is changed in this stage either.
      that should be gone (a pickup consumed), set steps to start from a state
      (Health 90 before a cap test), capture steps with look_at for pictures of
      the thing being tested, and an expect_log step with min_verbosity Error
-     and absent=true for "no errors".
+     and absent=true for "no errors";
+   - for anything the player reads or presses (a HUD, a menu, a results
+     screen): expect_ui steps on the widget's text and visibility, and click
+     steps on its buttons followed by a check of what the click caused.
 5. Show the user the plan: batches, risky steps, and the checks. For small,
    easily undone work, go ahead; for anything large or destructive, wait for
    their yes.
@@ -206,12 +209,16 @@ Goal: {goal}
 3. Playtest: hf_pie_run_playtest with start_pie=true and the plan's steps.
    It waits for a short run and returns the finished report (each step's
    pass/fail); poll hf_pie_get_playtest only if it says it is still running.
-   hf_pie_get_playtest with image_step fetches a picture. Look at the
-   pictures.
+   hf_pie_get_playtest with image_step fetches a picture. Pictures from the
+   player's camera include the HUD and widgets. Look at the pictures.
+   The UI is checked like everything else: expect_ui steps for its text and
+   visibility, click steps for its buttons (a real click, so a button a
+   player could not press fails), then a check of what the click caused.
 4. When a step fails, find out why before changing anything:
    - hf_pie_get_log: what the game logged, filtered by category or text;
    - hf_pie_read: the live values on the player pawn, game state or an actor;
-   - hf_pie_capture: a picture from the player's camera now.
+   - hf_pie_read_ui: every widget on screen, with the text it shows now;
+   - hf_pie_capture: a picture from the player's camera now, UI included.
    For a hands-on look: hf_start_pie, then hf_pie_inject_input and
    hf_pie_watch, then hf_stop_pie.
    Fix through the build playbook, then run this one again.
@@ -257,7 +264,7 @@ KNOWN_TOOLS = frozenset({
     "hf_get_automation_run", "hf_pie_run_playtest", "hf_pie_get_playtest",
     "hf_set_checkpoint", "hf_list_checkpoints", "hf_rollback_to_checkpoint",
     "hf_compile_blueprint", "hf_list_blueprint_errors", "hf_save_all",
-    "hf_find_references", "hf_pie_get_log", "hf_pie_read", "hf_pie_capture",
+    "hf_find_references", "hf_pie_get_log", "hf_pie_read", "hf_pie_capture", "hf_pie_read_ui",
     "hf_start_pie", "hf_stop_pie", "hf_pie_inject_input", "hf_pie_watch",
     "hf_source_modules", "hf_source_new_class", "hf_source_read", "hf_source_patch",
     "hf_source_add_dependency", "hf_source_compile", "hf_get_compile",
@@ -313,7 +320,8 @@ TOOLKITS: dict[str, list[tuple[str, list[str]]]] = {
         ("Checks", ["hf_list_blueprint_errors", "hf_list_automation_tests", "hf_run_automation_tests",
                     "hf_get_automation_run"]),
         ("Play", ["hf_pie_run_playtest", "hf_pie_get_playtest", "hf_pie_get_log", "hf_pie_read",
-                  "hf_pie_capture", "hf_pie_get_behavior_tree", "hf_start_pie", "hf_stop_pie"]),
+                  "hf_pie_capture", "hf_pie_read_ui", "hf_pie_click_widget", "hf_pie_get_behavior_tree",
+                  "hf_start_pie", "hf_stop_pie"]),
     ],
 }
 
