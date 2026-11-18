@@ -208,6 +208,12 @@ class TestNotesThroughTheStageLock:
         assert r.structured_content["in"] == "project notes" and "stage:design" in notes[0]["tags"]
         text = (await call(srv, "hf_search_tools", {"playbook": "plan"})).structured_content["text"]
         assert "Hull at /Game/BP_Hull" in text
+        # the editor returns notes newest first; a later save of the same stage wins
+        editor.tool("hf_get_project_notes")(lambda msg: _reply(msg, {"notes": [
+            {"text": n["text"], "tags": n["tags"]} for n in reversed(notes)]}))
+        await call(srv, "hf_write", {"tool": "hf_stage_notes", "args": {"stage": "design", "text": "Hull moved to /Game/BP_Hull2"}})
+        text = (await call(srv, "hf_search_tools", {"playbook": "plan"})).structured_content["text"]
+        assert "BP_Hull2" in text and "at /Game/BP_Hull\n" not in text
 
     def test_hf_tool_schema_knows_hf_stage_notes(self):
         pass
@@ -260,3 +266,78 @@ class TestAliases:
         assert r.is_error and "design stage" in r.content[0].text  # the stage lock still applies
         r = await call(srv, "hf_delete_actor", {"actor": "Rock"})
         assert r.is_error and len(sent(editor, "hf_delete_actor")) == 0
+
+
+class TestStatelessProtocol:
+    """The 2026-07-28 protocol, through the SDK's own client: no handshake,
+    and an approval comes back as input_required instead of a mid-call
+    request. The older protocol keeps working beside it."""
+
+    @staticmethod
+    def _client(srv, mode, answer):
+        from mcp import Client
+
+        asked: list[str] = []
+
+        async def on_elicit(_ctx, params):
+            asked.append(params.message)
+            return types.ElicitResult(action="accept", content={"approve": answer})
+
+        return Client(srv.server, mode=mode, elicitation_callback=on_elicit), asked
+
+    @pytest.mark.parametrize("mode", ["2026-07-28", "legacy"])
+    async def test_an_approved_destroy_runs_on_both_protocols(self, gw2, mode):
+        srv, editor, _ = gw2
+        client, asked = self._client(srv, mode, True)
+        async with client:
+            await client.call_tool("hf_bridge_status", {})
+            r = await client.call_tool("hf_destroy", {"tool": "hf_delete_actor", "args": {"actor": "Rock"}})
+        assert not r.is_error, r.content
+        assert len(asked) == 1 and "hf_delete_actor" in asked[0]
+        assert len(sent(editor, "hf_delete_actor")) == 1  # once, not once per round
+
+    @pytest.mark.parametrize("mode", ["2026-07-28", "legacy"])
+    async def test_a_declined_destroy_does_not_run(self, gw2, mode):
+        srv, editor, _ = gw2
+        client, _ = self._client(srv, mode, False)
+        async with client:
+            await client.call_tool("hf_bridge_status", {})
+            r = await client.call_tool("hf_destroy", {"tool": "hf_delete_actor", "args": {"actor": "Rock"},
+                                                      "confirm": True})
+        assert r.is_error and "did not approve" in r.content[0].text
+        assert not sent(editor, "hf_delete_actor")
+
+    async def test_an_answer_without_our_state_is_not_an_approval(self, gw2):
+        srv, editor, _ = gw2
+        client, _ = self._client(srv, "2026-07-28", True)
+        async with client:
+            await client.call_tool("hf_bridge_status", {})
+            # A forged answer with no requestState: the question is asked
+            # again rather than taken as yes.
+            r = await client.session.call_tool(
+                "hf_destroy", {"tool": "hf_delete_actor", "args": {"actor": "Rock"}},
+                input_responses={"approve_x": types.ElicitResult(action="accept", content={"approve": True})},
+                allow_input_required=True)
+            assert isinstance(r, types.InputRequiredResult)
+            # A state minted for a different call does not carry over either.
+            other = await client.session.call_tool(
+                "hf_destroy", {"tool": "hf_delete_actor", "args": {"actor": "Tree"}}, allow_input_required=True)
+            key = next(iter(r.input_requests))
+            from mcp.shared.exceptions import MCPError
+            with pytest.raises(MCPError, match="requestState"):  # the SDK's seal is bound to the request
+                await client.session.call_tool(
+                    "hf_destroy", {"tool": "hf_delete_actor", "args": {"actor": "Rock"}},
+                    input_responses={key: types.ElicitResult(action="accept", content={"approve": True})},
+                    request_state=other.request_state, allow_input_required=True)
+        assert not sent(editor, "hf_delete_actor")
+
+    async def test_a_batch_does_not_ask_mid_way_on_the_new_protocol(self, gw2):
+        srv, editor, _ = gw2
+        client, asked = self._client(srv, "2026-07-28", True)
+        async with client:
+            await client.call_tool("hf_bridge_status", {})
+            r = await client.call_tool("hf_batch", {"steps": [
+                {"tool": "hf_source_add_dependency", "args": {"module": "UMG"}}]})
+        body = r.structured_content
+        assert "on its own" in json.dumps(body) and not asked
+        assert not sent(editor, "hf_source_add_dependency")

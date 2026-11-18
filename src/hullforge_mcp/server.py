@@ -24,8 +24,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+import contextvars
+import hashlib
+
 import mcp.types as types
 from mcp.server.lowlevel import NotificationOptions, Server
+from mcp.server.request_state import RequestStateBoundary, RequestStateSecurity
 
 from .client import BridgeClient, BridgeError, ToolFailed, ToolOutcomeUnknown
 from . import api_index as _api_index
@@ -43,6 +47,64 @@ from .session import (
     process_is_alive,
     session_registry_dir,
 )
+
+# THE 2026-07-28 PROTOCOL (stateless). A client on it sends every request with
+# its own envelope and no handshake, and the server can no longer send it a
+# request of its own mid-call: an approval is asked by answering the call with
+# input_required, and the client calls again carrying the user's answer. The
+# SDK serves both eras on one connection; what changes here is only how a
+# human is asked. Clients on the older protocol keep the in-call elicitation.
+try:
+    from mcp_types.version import MODERN_PROTOCOL_VERSIONS as _MV
+except ImportError:  # an SDK older than 2.3
+    _MV = ("2026-07-28",)
+_MODERN_VERSIONS = frozenset(_MV)
+
+
+class _BatchNeedsApproval(Exception):
+    """An approval needed inside hf_batch on the 2026-07-28 protocol."""
+
+
+class _NeedsInput(Exception):
+    """Raised inside a call on the 2026-07-28 protocol when a human has to
+    answer first; the call is answered with input_required and runs again
+    from the start when the client calls back with the answer."""
+
+    def __init__(self, key: str, message: str) -> None:
+        super().__init__(message)
+        self.key = key
+        self.message = message
+
+
+class _Round:
+    """One tools/call as this connector sees it: which protocol, and on a
+    retry, the answers the client brought back for the questions we asked."""
+
+    def __init__(self, modern: bool, call_id: str, answers: dict[str, Any] | None = None,
+                 in_batch: bool = False) -> None:
+        self.modern = modern
+        self.call_id = call_id
+        self.answers = answers or {}
+        self.in_batch = in_batch
+
+
+_ROUND: contextvars.ContextVar[_Round | None] = contextvars.ContextVar("hullforge_round", default=None)
+
+_APPROVE_SCHEMA: dict[str, Any] = {"type": "object", "properties": {
+    "approve": {"type": "boolean", "title": "Approve", "default": False}}, "required": ["approve"]}
+
+
+def _call_id(name: str, args: dict[str, Any]) -> str:
+    """What one call asks for, so an answer given for one call is never
+    spent on another (the arguments are part of it)."""
+    return hashlib.sha256(json.dumps([name, args], sort_keys=True, default=str).encode()).hexdigest()[:32]
+
+
+def _answer_approved(res: Any) -> bool:
+    action = getattr(res, "action", None) if not isinstance(res, dict) else res.get("action")
+    content = (getattr(res, "content", None) if not isinstance(res, dict) else res.get("content")) or {}
+    return action == "accept" and bool(content.get("approve"))
+
 
 # Window captures that only show a current frame while the editor is in front.
 _FOCUS_FOR_CAPTURE = frozenset({"hf_screenshot"})
@@ -189,6 +251,12 @@ class HullForgeServer:
             version="0.1.0",
             instructions=_gateway.INSTRUCTIONS,
         )
+        # requestState goes to the client and comes back; sealed so a client
+        # (or anything between) cannot mint an approval the user never gave.
+        # The keys live only in this process, so state outlives neither it
+        # nor ten minutes.
+        self.server.middleware.append(RequestStateBoundary(
+            RequestStateSecurity.ephemeral(ttl=600.0), default_audience="hullforge"))
         # Use the concrete params models directly. Reading them off
         # Request.model_fields["params"].annotation looks tidier but yields a
         # union for optional params (PaginatedRequestParams | None), and the
@@ -596,7 +664,21 @@ class HullForgeServer:
         # Source compiles are done once, after the batch.
         if tool == "hf_source_write" and isinstance(inner, dict) and "files" in inner:
             inner = {**inner, "compile": False}
-        result = await self._gateway_invoke(caller, {"tool": tool, "args": inner, "verbose": run.verbose})
+        rnd = _ROUND.get()
+        was = rnd.in_batch if rnd is not None else False
+        if rnd is not None:
+            rnd.in_batch = True
+        try:
+            result = await self._gateway_invoke(caller, {"tool": tool, "args": inner, "verbose": run.verbose})
+        except _BatchNeedsApproval:
+            run.failed = {"step": where, "tool": tool,
+                          "error": f"'{tool}' needs the user's approval, which this client gives by calling "
+                                   f"again, so it is not run in a batch: call it with hf_write on its own. "
+                                   f"The steps before this one did run."}
+            return
+        finally:
+            if rnd is not None:
+                rnd.in_batch = was
         run.ran += 1
         if result.is_error:
             run.failed = {"step": where, "tool": tool, "error": _result_text(result)}
@@ -635,8 +717,47 @@ class HullForgeServer:
         if session is not None:
             self._mcp_session = session
 
-    async def _handle_call_tool(self, ctx: Any, params: Any) -> types.CallToolResult:
+    async def _handle_call_tool(self, ctx: Any, params: Any) -> types.CallToolResult | types.InputRequiredResult:
         self._remember_session(ctx)
+        session = getattr(ctx, "session", None)
+        modern = str(getattr(session, "protocol_version", "") or "") in _MODERN_VERSIONS
+        name = params.name
+        call_id = _call_id(name, params.arguments or {})
+        answers: dict[str, Any] = {}
+        if modern:
+            answers = self._round_answers(params, call_id)
+        token = _ROUND.set(_Round(modern, call_id, answers))
+        try:
+            return await self._call_tool(ctx, params)
+        except _NeedsInput as need:
+            return types.InputRequiredResult(
+                input_requests={need.key: types.ElicitRequest(params=types.ElicitRequestFormParams(
+                    message=need.message, requested_schema=_APPROVE_SCHEMA))},
+                request_state=json.dumps({"call": call_id, "asked": [need.key]}),
+            )
+        finally:
+            _ROUND.reset(token)
+
+    @staticmethod
+    def _round_answers(params: Any, call_id: str) -> dict[str, Any]:
+        """The answers a retry brought, kept only for questions this
+        connector asked on this very call. The state is verified and
+        unsealed by the SDK before it gets here; anything that does not
+        match is ignored, so the question is simply asked again."""
+        raw = getattr(params, "request_state", None)
+        responses = getattr(params, "input_responses", None) or {}
+        if not raw or not responses:
+            return {}
+        try:
+            state = json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+        if not isinstance(state, dict) or state.get("call") != call_id:
+            return {}
+        asked = {str(k) for k in (state.get("asked") or [])}
+        return {k: v for k, v in dict(responses).items() if k in asked}
+
+    async def _call_tool(self, ctx: Any, params: Any) -> types.CallToolResult:
 
         name = params.name
         args = params.arguments or {}
@@ -1272,6 +1393,20 @@ class HullForgeServer:
     async def _human_confirm(self, message: str) -> bool | None:
         """Ask the user through MCP elicitation. True/False is their answer;
         None means this client cannot ask (the caller decides the fallback)."""
+        rnd = _ROUND.get()
+        if rnd is not None and rnd.modern:
+            key = "approve_" + hashlib.sha256(message.encode()).hexdigest()[:16]
+            if key in rnd.answers:
+                return _answer_approved(rnd.answers[key])
+            session = getattr(self, "_mcp_session", None)
+            caps = getattr(session, "client_capabilities", None)
+            if caps is None or getattr(caps, "elicitation", None) is None:
+                return None
+            if rnd.in_batch:
+                # Asking means running the whole call again with the answer,
+                # and a batch's earlier steps would run twice.
+                raise _BatchNeedsApproval(message)
+            raise _NeedsInput(key, message)
         session = getattr(self, "_mcp_session", None)
         if session is None:
             return None
@@ -1313,7 +1448,11 @@ class HullForgeServer:
             for n in notes:
                 tags = [str(t) for t in (n.get("tags") or [])]
                 for e in earlier:
-                    if f"stage:{e}" in tags:
+                    # NEWEST FIRST is the order the editor returns them in, so
+                    # the first note per stage is its latest. Keeping the last
+                    # one instead handed a verify stage the build's earlier
+                    # "blocked" note in place of its final one.
+                    if f"stage:{e}" in tags and e not in latest:
                         latest[e] = str(n.get("text") or "")
             if latest:
                 return "\n\n".join(f"## {e}\n{latest[e][:12000]}" for e in earlier if e in latest)
