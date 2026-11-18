@@ -36,7 +36,7 @@ Recommended Claude Code permissions: `docs/claude-code-settings.json`.
   not accepted by you.
 * Source edits are off until you turn on **Allow source edits** for the project.
 
-## Paid generation (Meshy, ElevenLabs, ...)
+## Paid generation (Meshy, ElevenLabs, fal and others)
 
 * **Off until you turn it on**, in Editor Preferences > Plugins > HullForge
   Generation. These settings are yours: saved in your own Windows profile
@@ -61,6 +61,28 @@ Recommended Claude Code permissions: `docs/claude-code-settings.json`.
 * **Provenance**: every generated asset is recorded with the service, model,
   prompt and date in `HullForge/generated-assets.json` in the project, for
   AI-content disclosures.
+* **Services and the hosts each may reach.** A request or download to any
+  other host is refused before it is sent.
+
+  | Service | Hosts |
+  | --- | --- |
+  | Meshy | api.meshy.ai, assets.meshy.ai |
+  | ElevenLabs | api.elevenlabs.io |
+  | fal | fal.run, fal.media |
+  | Scenario | scenario.com |
+  | Tripo | tripo3d.com, tripo3d.ai |
+  | Recraft | recraft.ai |
+  | Black Forest Labs | bfl.ai |
+  | Ideogram | ideogram.ai |
+  | Stability AI | stability.ai |
+  | World Labs | worldlabs.ai, storage.googleapis.com (its signed download links) |
+  | Blockade Labs | blockadelabs.com, blockade-platform-production.s3.amazonaws.com |
+  | DeepMotion | the API host you enter, storage.googleapis.com |
+  | Sonilo | sonilo.com |
+  | Replicate | replicate.com, replicate.delivery |
+  | Atlas Cloud | atlascloud.ai |
+
+  A host entry also covers its subdomains. Downloads carry no key.
 
 ## Transport
 
