@@ -225,6 +225,9 @@ async def perf_budget(run: Run, store: Store, args: dict[str, Any]) -> dict[str,
            "worst_frames": ((result or {}).get("worst_frames") or [])[:5] if isinstance(result, dict) else [],
            "top_scene_costs": findings_of(cost, 12)[1] if findings_of(cost)[0] else cost,
            "large_textures": findings_of(tex, 10), "lod_issues": findings_of(lods, 10), "suggestions": suggestions}
+    if not args.get("map"):
+        out["note"] = ("Measured in Play In Editor, where the editor's own work lands on the game thread and inflates "
+                       "game_ms. Pass 'map' to measure a standalone game before acting on a game-thread overrun.")
     baseline = args.get("baseline")
     if baseline:
         name = safe_id(baseline, "baseline")
