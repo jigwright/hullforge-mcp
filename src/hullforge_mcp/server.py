@@ -39,6 +39,7 @@ from . import crash as _crash
 from . import playbooks as _playbooks
 from . import codemode as _codemode
 from . import design as _design
+from . import workflows as _workflows
 from .friction import FrictionLog
 from mcp.shared.exceptions import MCPError
 from .session import (
@@ -438,15 +439,15 @@ class HullForgeServer:
         # for tables), but are found and called like any other tool.
         design_tools: list[types.Tool] = []
         index_areas, index_mutating = dict(areas), set(mutating)
-        for d in _design.TOOLS:
+        for d, area in [(t, _design.AREA) for t in _design.TOOLS] + [(t, _workflows.AREA) for t in _workflows.TOOLS]:
             if d.name in areas:
                 continue
-            index_areas[d.name] = _design.AREA
+            index_areas[d.name] = area
             if d.kind == _design.WRITE:
                 index_mutating.add(d.name)
             design_tools.append(types.Tool(
                 name=d.name, title=_display_title(d.name), description=d.description,
-                input_schema=d.schema, meta={_AREA_META_KEY: _design.AREA},
+                input_schema=d.schema, meta={_AREA_META_KEY: area},
                 annotations=types.ToolAnnotations(read_only_hint=d.kind == _design.READ,
                                                   destructive_hint=False, idempotent_hint=True),
             ))
@@ -1241,7 +1242,7 @@ class HullForgeServer:
             return _error("'args' must be an object of the tool's arguments. Nothing was changed.")
         if tool == _gateway.NOTES:
             return await self._stage_notes_call(caller, inner)
-        if tool in _design.TOOL_NAMES:
+        if tool in _design.TOOL_NAMES or tool in _workflows.TOOL_NAMES:
             return await self._design_call(tool, inner)
         # Arguments the CONNECTOR handles, taken off before the editor's schema
         # sees them (the editor's schemas refuse unknown keys).
@@ -1582,8 +1583,11 @@ class HullForgeServer:
 
         connected = self._client is not None and self._client.connected
         try:
-            out = await _design.call_tool(tool, inner, _design.Store(project_dir), engine if connected else None,
-                                          playtest if connected else None)
+            if tool in _workflows.TOOL_NAMES:
+                out = await _workflows.call_tool(tool, inner, _design.Store(project_dir), engine if connected else None)
+            else:
+                out = await _design.call_tool(tool, inner, _design.Store(project_dir), engine if connected else None,
+                                              playtest if connected else None)
         except _design.DesignError as exc:
             return _error(f"{exc} Nothing was changed.")
         return types.CallToolResult(content=[types.TextContent(type="text", text=_compact(out))],
