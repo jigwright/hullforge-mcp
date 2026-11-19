@@ -49,7 +49,7 @@ class TestContent:
     @pytest.mark.parametrize("name", playbooks.ORDER)
     def test_names_only_known_tools(self, name):
         named = _names_in(playbooks.render(name))
-        unknown = named - playbooks.KNOWN_TOOLS - playbooks.GATEWAY_TOOLS
+        unknown = named - playbooks.KNOWN_TOOLS - playbooks.GATEWAY_TOOLS - playbooks.DESIGN_TOOLS
         assert not unknown, f"{name} names tools nobody checked: {sorted(unknown)}"
 
     @pytest.mark.parametrize("name", playbooks.ORDER)

@@ -38,6 +38,7 @@ from . import focus as _focus
 from . import crash as _crash
 from . import playbooks as _playbooks
 from . import codemode as _codemode
+from . import design as _design
 from .friction import FrictionLog
 from mcp.shared.exceptions import MCPError
 from .session import (
@@ -432,10 +433,28 @@ class HullForgeServer:
                 ),
             ))
 
+        # The game design tools run here in the connector (they keep files in
+        # the project's HullForge/Design folder and use the editor's own tools
+        # for tables), but are found and called like any other tool.
+        design_tools: list[types.Tool] = []
+        index_areas, index_mutating = dict(areas), set(mutating)
+        for d in _design.TOOLS:
+            if d.name in areas:
+                continue
+            index_areas[d.name] = _design.AREA
+            if d.kind == _design.WRITE:
+                index_mutating.add(d.name)
+            design_tools.append(types.Tool(
+                name=d.name, title=_display_title(d.name), description=d.description,
+                input_schema=d.schema, meta={_AREA_META_KEY: _design.AREA},
+                annotations=types.ToolAnnotations(read_only_hint=d.kind == _design.READ,
+                                                  destructive_hint=False, idempotent_hint=True),
+            ))
+
         self._catalog = tools
         self._mutating = mutating
         self._areas = areas
-        self._index.rebuild(tools, areas, mutating)
+        self._index.rebuild(tools + design_tools, index_areas, index_mutating)
 
         log.info("catalog: %d tools (%d mutating) across %d areas",
                  len(tools), len(mutating), len(set(areas.values())))
@@ -1222,6 +1241,8 @@ class HullForgeServer:
             return _error("'args' must be an object of the tool's arguments. Nothing was changed.")
         if tool == _gateway.NOTES:
             return await self._stage_notes_call(caller, inner)
+        if tool in _design.TOOL_NAMES:
+            return await self._design_call(tool, inner)
         # Arguments the CONNECTOR handles, taken off before the editor's schema
         # sees them (the editor's schemas refuse unknown keys).
         extra: dict[str, Any] = {}
@@ -1538,6 +1559,35 @@ class HullForgeServer:
             if f.is_file():
                 parts.append(f"## {earlier}\n{f.read_text(encoding='utf-8')[:12000]}")
         return "\n\n".join(parts)
+
+    async def _design_call(self, tool: str, inner: dict[str, Any]) -> types.CallToolResult:
+        """A game design tool (design.py): files in the project's Design folder,
+        tables through the editor's own tools."""
+        project_dir = str((self._last_editor or {}).get("project_dir") or "")
+        if not project_dir:
+            return _error(f"{tool} needs the editor connected (it works in the project's folder). "
+                          f"Open the project, then call it again.")
+
+        async def engine(name: str, args: dict[str, Any]) -> tuple[bool, Any]:
+            r = await self._dispatch(name, args)
+            if r.is_error:
+                return False, _result_text(r)
+            return True, r.structured_content if r.structured_content is not None else _result_text(r)
+
+        async def playtest(args: dict[str, Any]) -> tuple[bool, Any]:
+            r = await self._run_playtest_and_wait(args)
+            if r.is_error:
+                return False, _result_text(r)
+            return True, r.structured_content if r.structured_content is not None else _result_text(r)
+
+        connected = self._client is not None and self._client.connected
+        try:
+            out = await _design.call_tool(tool, inner, _design.Store(project_dir), engine if connected else None,
+                                          playtest if connected else None)
+        except _design.DesignError as exc:
+            return _error(f"{exc} Nothing was changed.")
+        return types.CallToolResult(content=[types.TextContent(type="text", text=_compact(out))],
+                                    structured_content=out)
 
     async def _stage_notes_call(self, caller: str, inner: dict[str, Any]) -> types.CallToolResult:
         """hf_stage_notes: hf_write saves a stage's handoff, hf_read returns them.
@@ -1878,7 +1928,9 @@ _ALIAS_TOOLS = [
 ]
 
 # Tools the stage lock lets through: they record the handoff, not project changes.
-_NOTE_TOOLS = frozenset({"hf_stage_notes", "hf_add_project_note", "hf_create_plan", "hf_update_plan"})
+_NOTE_TOOLS = frozenset({"hf_stage_notes", "hf_add_project_note", "hf_create_plan", "hf_update_plan",
+                         # The design doc and story bible ARE the design stage's output.
+                         "hf_write_design_doc", "hf_write_story_bible"})
 
 # Arguments the connector takes off a tool's call and handles itself.
 _CONNECTOR_ARGS: dict[str, tuple[str, ...]] = {

@@ -70,6 +70,10 @@ until the build stage. Read, look and ask.
    - hf_describe_input_mappings: the input the player already has.
    - hf_get_selection: what the user is pointing at, if anything.
    - hf_screenshot: what the level looks like now.
+   - hf_design_doc and hf_story_bible: the game's pillars, scope and story,
+     if the project has them. For a new game idea, help the user shape a pitch
+     into one with hf_write_design_doc (this stage may save it), and check
+     the scope with hf_scope_check.
 2. Learn how the engine does it. Use hf_api_lookup for the classes, functions
    and modules involved, and for known traps in this engine version.
 3. Pin down "done" with the user. Turn it into checks a playtest can make:
@@ -83,7 +87,10 @@ until the build stage. Read, look and ask.
      from primitives, hf_generation_status says which paid services the user
      set up; propose them (what, with which service), never assume them;
    - the acceptance checks from step 3;
-   - risks: anything that deletes, renames, or touches many assets.
+   - risks: anything that deletes, renames, or touches many assets;
+   - for story, dialogue, quests, tuning or balance: the Game Design tools
+     (hf_search_tools area "Game Design") check and simulate them, and the
+     build stage writes them into Data Tables.
    Ask for a yes before planning work that deletes or reworks existing content.
 5. Save the design as the handoff to the next stages: hf_write
    {{"tool": "hf_stage_notes", "args": {{"stage": "design", "text": "<the design,
@@ -276,6 +283,9 @@ KNOWN_TOOLS = frozenset({
     "hf_source_restore", "hf_edit_blueprint_graph", "hf_set_property",
     "hf_add_blueprint_component", "hf_source_write",
 })
+
+# The game design tools, run by the connector (design.py); playbooks name them too.
+from .design import TOOL_NAMES as DESIGN_TOOLS  # noqa: E402
 
 # The connector's own tools, which playbooks also name.
 GATEWAY_TOOLS = frozenset({
