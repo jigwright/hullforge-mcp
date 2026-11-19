@@ -164,6 +164,39 @@ registered for it, but the menu above is reliable everywhere.
 
 Full instructions: [jigwright.com/hullforge/docs](https://jigwright.com/hullforge/docs)
 
+### Other MCP clients
+
+HullForge is a standard MCP server, so any client can use it. Download
+`hullforge-mcp.exe` from the latest release (or use the copy inside the
+installed `.mcpb`) and point your client at it. Tested with Claude, Codex,
+Cursor and Google Antigravity.
+
+| Client | How to add it |
+| --- | --- |
+| Claude Code | `claude mcp add hullforge -- C:\path\to\hullforge-mcp.exe` |
+| Codex | In `~/.codex/config.toml`: `[mcp_servers.hullforge]` then `command = "C:/path/to/hullforge-mcp.exe"` |
+| Cursor | In `.cursor/mcp.json` (project) or `~/.cursor/mcp.json`: `{"mcpServers": {"hullforge": {"command": "C:/path/to/hullforge-mcp.exe"}}}` |
+| Google Antigravity | `agy mcp add hullforge C:/path/to/hullforge-mcp.exe` |
+
+Non-interactive runs refuse MCP tools until you allow them. Allow HullForge's
+tools rather than everything:
+
+- Cursor (`agent -p`): `.cursor/cli.json` with `{"permissions": {"allow": ["Mcp(hullforge:*)"]}}`, plus `--approve-mcps`.
+- Antigravity (`agy -p`): `"permissions": {"allow": ["mcp(hullforge/*)"]}` in its `settings.json`, or for one run with `--settings`.
+
+### Local HTTP
+
+For clients that take a URL instead of a command:
+
+```
+hullforge-mcp.exe --http --port 8765
+```
+
+It serves `http://127.0.0.1:8765/mcp` on this machine only. Every request needs
+`Authorization: Bearer <token>`; the token is made once and kept in
+`%LOCALAPPDATA%\HullForge\http-token` (or set `HULLFORGE_HTTP_TOKEN`).
+Requests from web pages are refused.
+
 ## Privacy
 
 The connector collects nothing, transmits nothing, and contacts no server. All

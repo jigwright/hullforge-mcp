@@ -96,8 +96,8 @@ try {
 
         '--company-name=Jigwright',
         '--product-name=HullForge',
-        '--file-version=0.1.0',
-        '--product-version=0.1.0',
+        '--file-version=1.1.0',
+        '--product-version=1.1.0',
         '--file-description=HullForge MCP server for Unreal Engine',
         '--copyright=Copyright (c) 2026 Jigwright. All rights reserved.',
 

@@ -251,7 +251,7 @@ class HullForgeServer:
         self._verbose = False
         self.server: Server = Server(
             "hullforge",
-            version="0.1.0",
+            version="1.1.0",
             instructions=_gateway.INSTRUCTIONS,
         )
         # requestState goes to the client and comes back; sealed so a client
