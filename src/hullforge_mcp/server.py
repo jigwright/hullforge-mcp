@@ -1907,6 +1907,88 @@ class HullForgeServer:
                 finally:
                     tg.cancel_scope.cancel()
 
+    async def run_http(self, port: int, token: str) -> None:
+        """Streamable HTTP on this machine only, for clients that prefer a URL to a command."""
+        import anyio
+        import uvicorn
+        from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+        from mcp.server.transport_security import TransportSecuritySettings
+
+        hosts = [f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"]
+        manager = StreamableHTTPSessionManager(
+            app=self.server,
+            security_settings=TransportSecuritySettings(
+                enable_dns_rebinding_protection=True, allowed_hosts=hosts,
+                allowed_origins=[f"http://{h}" for h in hosts]),
+        )
+        app = http_app(manager.handle_request, token)
+        async with manager.run():
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(self._watch_for_editors)
+                server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port,
+                                                       log_level="warning", lifespan="off"))
+                try:
+                    await server.serve()
+                finally:
+                    tg.cancel_scope.cancel()
+
+
+def http_app(handle: Any, token: str) -> Any:
+    """The HTTP front door: /mcp only, and only with the bearer token.
+
+    The server drives a live editor, so a page in a browser on this machine must
+    not be able to reach it. Binding to 127.0.0.1 keeps the network out; the
+    token keeps out anything local that does not hold it; the SDK's Host and
+    Origin checks stop DNS rebinding.
+    """
+    import hmac
+
+    expected = f"Bearer {token}".encode()
+
+    async def reply(send: Any, status: int, text: str, extra: list[tuple[bytes, bytes]] | None = None) -> None:
+        body = text.encode()
+        await send({"type": "http.response.start", "status": status,
+                    "headers": [(b"content-type", b"text/plain; charset=utf-8"),
+                                (b"content-length", str(len(body)).encode()), *(extra or [])]})
+        await send({"type": "http.response.body", "body": body})
+
+    async def app(scope: Any, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            return
+        if scope.get("path", "").rstrip("/") != "/mcp":
+            await reply(send, 404, "HullForge serves MCP at /mcp.")
+            return
+        got = dict(scope.get("headers") or []).get(b"authorization", b"")
+        if not hmac.compare_digest(got, expected):
+            await reply(send, 401, "HullForge: missing or wrong bearer token. It is in the file named when "
+                        "the server started, or set HULLFORGE_HTTP_TOKEN.", [(b"www-authenticate", b"Bearer")])
+            return
+        await handle(scope, receive, send)
+
+    return app
+
+
+def http_token() -> tuple[str, str]:
+    """The token from HULLFORGE_HTTP_TOKEN, else a per-user file, made once."""
+    import secrets
+    from pathlib import Path
+
+    env = os.environ.get("HULLFORGE_HTTP_TOKEN")
+    if env:
+        return env, "HULLFORGE_HTTP_TOKEN"
+    base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".local" / "share") / "HullForge"
+    path = base / "http-token"
+    if path.is_file() and path.read_text(encoding="utf-8").strip():
+        return path.read_text(encoding="utf-8").strip(), str(path)
+    base.mkdir(parents=True, exist_ok=True)
+    token = secrets.token_urlsafe(32)
+    path.write_text(token, encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    return token, str(path)
+
 
 # The tools listed beside the catalog, which are called directly.
 _TOP_LEVEL = {"hf_bridge_status", *_gateway.NAMES, _gateway.LOOKUP, _gateway.BATCH, _gateway.CODE,
@@ -2256,7 +2338,21 @@ def main() -> None:
     # project's own session file as an extra place to look.
     project_dir = os.environ.get("HULLFORGE_PROJECT_DIR") or None
 
-    anyio.run(HullForgeServer(project_dir).run_stdio)
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="hullforge-mcp", description="HullForge MCP connector for Unreal Engine.")
+    parser.add_argument("--http", action="store_true",
+                        help="serve Streamable HTTP at http://127.0.0.1:PORT/mcp instead of stdio")
+    parser.add_argument("--port", type=int, default=8765, help="port for --http (default 8765)")
+    opts = parser.parse_args()
+    server = HullForgeServer(project_dir)
+    if not opts.http:
+        anyio.run(server.run_stdio)
+        return
+    token, where = http_token()
+    print(f"HullForge MCP: http://127.0.0.1:{opts.port}/mcp\n"
+          f"Send the header  Authorization: Bearer <token>  (token in {where}).", file=sys.stderr, flush=True)
+    anyio.run(server.run_http, opts.port, token)
 
 
 if __name__ == "__main__":
