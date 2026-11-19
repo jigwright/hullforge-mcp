@@ -138,59 +138,100 @@ async def ship_check(run: Run, args: dict[str, Any]) -> dict[str, Any]:
 
 # ---------------------------------------------------------- 2 perf budget
 
-DEFAULT_BUDGET = {"frame_ms": 16.6, "game_ms": 8.0, "draw_ms": 8.0, "gpu_ms": 14.0, "hitches": 3, "draw_calls": 3000,
-                  "triangles": 10_000_000}
-_BUDGET_KEYS = {"frame_ms": ("frame", "ms"), "game_ms": ("game", "ms"), "draw_ms": ("draw", "ms"),
-                "gpu_ms": ("gpu", "ms"), "hitches": ("hitch",), "draw_calls": ("draw", "call"),
-                "triangles": ("triangle",)}
+DEFAULT_BUDGET = {"frame_ms": 16.6, "frame_p95_ms": 20.0, "game_ms": 8.0, "render_ms": 8.0, "gpu_ms": 14.0,
+                  "hitches_per_minute": 2}
+# Where each budget lives in an hf_get_profile_run result.
+_BUDGET_PATHS = {"frame_ms": ("ms", "frame", "avg"), "frame_p95_ms": ("ms", "frame", "p95"),
+                 "game_ms": ("ms", "game", "avg"), "render_ms": ("ms", "render", "avg"),
+                 "gpu_ms": ("ms", "gpu", "avg"), "hitches_per_minute": ("hitches", "per_minute")}
+
+
+def _dig(obj: Any, path: tuple[str, ...]) -> Any:
+    for k in path:
+        if not isinstance(obj, dict):
+            return None
+        obj = obj.get(k)
+    return obj
+
+
+def compare_budget(result: dict[str, Any], budget: dict[str, float]) -> tuple[list, list, list]:
+    over, within, unknown = [], [], []
+    for key, limit in budget.items():
+        path = _BUDGET_PATHS.get(key)
+        v = _dig(result, path) if path else None
+        if not isinstance(v, (int, float)):
+            unknown.append(key)
+            continue
+        (over if v > float(limit) else within).append({"budget": key, "limit": limit, "measured": round(float(v), 2)})
+    return over, within, unknown
+
+
+async def _pie_playing(run: Run) -> bool:
+    st = await run("hf_get_pie_state", {})
+    return isinstance(st, dict) and bool(st.get("playing"))
 
 
 async def perf_budget(run: Run, store: Store, args: dict[str, Any]) -> dict[str, Any]:
     budget = {**DEFAULT_BUDGET, **(args.get("budget") or {})}
+    unknown_keys = [k for k in budget if k not in _BUDGET_PATHS]
+    if unknown_keys:
+        raise DesignError(f"budget keys are {sorted(_BUDGET_PATHS)}; not {unknown_keys}.")
     seconds = float(args.get("seconds") or 20)
-    prof_args: dict[str, Any] = {"seconds": seconds}
+    prof_args: dict[str, Any] = {"seconds": seconds, "warmup_seconds": 2}
+    started_pie = False
     if args.get("map"):
-        prof_args["map"] = str(args["map"])
-    started = await run("hf_profile_run", prof_args)
-    result = started
-    if isinstance(started, dict) and started.get("run_id") is not None and not started.get("finished"):
-        result = await wait_task(run, "hf_get_profile_run", {"run_id": started["run_id"]}, seconds + 90)
-    nums = numbers(result or {})
-    over, within, unknown = [], [], []
-    for key, limit in budget.items():
-        words = _BUDGET_KEYS.get(key, tuple(key.split("_")))
-        # Prefer an average over a max when both exist.
-        hit = pick(nums, *words, "avg") or pick(nums, *words, "mean") or pick(nums, *words)
-        if hit is None:
-            unknown.append(key)
-            continue
-        path, v = hit
-        (over if v > float(limit) else within).append({"budget": key, "limit": limit, "measured": round(v, 2), "from": path})
+        prof_args.update(target="standalone", map=str(args["map"]))
+    elif not await _pie_playing(run):
+        await run("hf_start_pie", {})
+        started_pie = True
+        deadline = time.monotonic() + 40
+        while time.monotonic() < deadline and not await _pie_playing(run):
+            await asyncio.sleep(1.0)
+    try:
+        started = await run("hf_profile_run", prof_args)
+        result = None
+        if isinstance(started, dict) and started.get("run_id") is not None:
+            deadline = time.monotonic() + seconds + (240 if args.get("map") else 60)
+            while time.monotonic() < deadline:
+                await asyncio.sleep(2.0)
+                r = await run("hf_get_profile_run", {"run_id": started["run_id"]})
+                if isinstance(r, dict) and r.get("done"):
+                    result = r.get("result") or r
+                    break
+    finally:
+        if started_pie:
+            await run("hf_stop_pie", {})
+    over, within, unknown = compare_budget(result or {}, budget)
     cost = await run("hf_audit_scene_cost", {"top": 12})
     tex = await run("hf_audit_textures", {"large_texture_size": int(args.get("large_texture") or 2048), "limit": 15})
     lods = await run("hf_audit_lods", {"limit": 15})
+    bound = (result or {}).get("bound_by") if isinstance(result, dict) else None
     suggestions = []
-    if any(o["budget"] in ("gpu_ms", "triangles", "draw_ms", "draw_calls") for o in over):
-        suggestions.append("GPU or draw bound: start with the heaviest meshes in scene_cost (enable Nanite on "
-                           "high-poly static meshes, add LODs where audit_lods flags them, merge small repeated props).")
-    if any(o["budget"] == "game_ms" for o in over):
-        suggestions.append("Game thread bound: look for Tick-heavy actors (hf_audit_actors) and per-frame Blueprint work.")
-    if any(o["budget"] == "hitches" for o in over):
-        suggestions.append("Hitches: usually streaming or shader compiles; check textures over budget and PSO caching.")
+    names = {o["budget"] for o in over}
+    if names & {"gpu_ms", "render_ms"}:
+        suggestions.append("GPU or render bound: start with the heaviest meshes in scene_cost (Nanite on high-poly "
+                           "static meshes, LODs where lod_issues flags them, fewer dynamic shadow casters).")
+    if "game_ms" in names or (isinstance(bound, dict) and (bound.get("game_pct") or 0) >= 60 and over):
+        suggestions.append("Game thread bound: look for ticking actors (the health report lists empty Tick events) "
+                           "and per-frame Blueprint work; hf_profile_run's worst_frames show when it spikes.")
+    if "hitches_per_minute" in names or "frame_p95_ms" in names:
+        suggestions.append("Spikes: usually streaming, garbage collection or shader compiles; check large_textures "
+                           "and PSO caching, and compare worst_frames with what happened at that moment.")
     if findings_of(tex)[0]:
         suggestions.append("Textures over the size limit cost memory and streaming: lower Max Texture Size or LOD bias.")
-    baseline = args.get("baseline")
-    out = {"verdict": "over budget" if over else ("within budget" if within else "could not measure"),
+    out = {"verdict": ("over budget: " + ", ".join(sorted(names))) if over else ("within budget" if within else "could not measure"),
            "over_budget": over, "within_budget": within, "not_measured": unknown,
+           "fps_avg": (result or {}).get("fps_avg") if isinstance(result, dict) else None, "bound_by": bound,
+           "worst_frames": ((result or {}).get("worst_frames") or [])[:5] if isinstance(result, dict) else [],
            "top_scene_costs": findings_of(cost, 12)[1] if findings_of(cost)[0] else cost,
-           "large_textures": findings_of(tex, 10), "lod_issues": findings_of(lods, 10),
-           "suggestions": suggestions, "profile": result}
+           "large_textures": findings_of(tex, 10), "lod_issues": findings_of(lods, 10), "suggestions": suggestions}
+    baseline = args.get("baseline")
     if baseline:
         name = safe_id(baseline, "baseline")
         if args.get("save_baseline"):
             out["baseline_saved"] = await run("hf_save_perf_baseline", {"name": name, "note": "hf_perf_budget"})
         else:
-            out["vs_baseline"] = await run("hf_compare_perf_baseline", {"name": name, "top": 10})
+            out["vs_baseline"] = await run("hf_compare_perf_baseline", {"top": 10})
     store.save({"budget": budget, "over": over, "within": within, "at": time.strftime("%Y-%m-%dT%H:%M:%S")},
                "perf", f"budget-{time.strftime('%Y%m%d-%H%M%S')}.json")
     return out
@@ -216,17 +257,22 @@ A11Y_SETTINGS = [
 
 async def accessibility(run: Run, store: Store, args: dict[str, Any]) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
-    mappings = await run("hf_describe_input_mappings", {"include_names": True})
-    text = json.dumps(mappings or {}, default=str).lower()
-    remap = "mappable" in text or "player_mappable" in text or "playermappable" in text
-    checks.append({"check": "Controls can be remapped", "status": "pass" if remap else "fail",
-                   "detail": "Enhanced Input actions need Player Mappable Key Settings to be remappable." if not remap else ""})
+    contexts = await run("hf_find_assets", {"path": "/Game", "recursive": True, "class_name": "InputMappingContext", "limit": 20})
+    mappable, total, per = 0, 0, []
+    for a in (contexts or {}).get("assets", []) if isinstance(contexts, dict) else []:
+        r = await run("hf_describe_player_mappable_config", {"context": a.get("object_path")})
+        if isinstance(r, dict):
+            mappable += int(r.get("player_mappable_count") or 0)
+            total += int(r.get("mapping_count") or 0)
+            per.append(f"{a.get('name')}: {r.get('player_mappable_count', 0)} of {r.get('mapping_count', 0)}")
+    checks.append({"check": "Controls can be remapped", "status": "pass" if mappable else ("fail" if total else "unknown"),
+                   "detail": ("Mappable mappings per context: " + "; ".join(per)) if mappable else
+                   ("No key mapping carries Player Mappable Key Settings, so a rebinding menu would be empty. "
+                    "Add them to each Input Action (or mapping) in your mapping contexts." if total else
+                    "No Enhanced Input mapping contexts were found.")})
     input_audit = await run("hf_audit_input", {"limit": 20})
     n, first = findings_of(input_audit, 8)
     checks.append({"check": "Input set has no conflicts or dead actions", "status": "pass" if n == 0 else "warn", "detail": first})
-    sub = await run("hf_get_suppress_subtitles", {})
-    suppressed = isinstance(sub, dict) and bool(sub.get("suppressed") or sub.get("value"))
-    checks.append({"check": "Subtitles are not suppressed project-wide", "status": "fail" if suppressed else "pass"})
     audio = await run("hf_audit_audio", {"limit": 30})
     a_text = json.dumps(audio or {}, default=str).lower()
     checks.append({"check": "Dialogue sounds carry subtitles", "status": "warn" if "subtitle" in a_text else "unknown",
@@ -236,7 +282,8 @@ async def accessibility(run: Run, store: Store, args: dict[str, Any]) -> dict[st
               "UI text contrast at least 4.5:1 against its background.",
               "No information only by sound: every important cue has a visual one.",
               "No timed input the player cannot slow down or turn off.",
-              "Pause anywhere, including cutscenes."]
+              "Pause anywhere, including cutscenes.",
+              "Subtitles are on by default and can be resized, with a background box."]
     out: dict[str, Any] = {"checks": checks, "check_by_hand": manual}
     if args.get("scaffold_settings", True) is not False and run.call is not None:
         rows = [{"Name": n, "Kind": t, "Notes": note, "DefaultValue": ("True" if n in ("Subtitles", "FlashReduction") else
@@ -341,8 +388,11 @@ def action_names(mappings: Any) -> list[str]:
 async def tutorial(run: Run, store: Store, args: dict[str, Any]) -> dict[str, Any]:
     steps_in = args.get("steps")
     if not steps_in:
-        mappings = await run("hf_describe_input_mappings", {"include_names": True})
-        acts = order_actions(action_names(mappings))
+        found = await run("hf_find_assets", {"path": "/Game", "recursive": True, "class_name": "InputAction", "limit": 60})
+        names = [a.get("name") for a in (found or {}).get("assets", [])] if isinstance(found, dict) else []
+        if not names:
+            names = action_names(await run("hf_describe_input_mappings", {"include_names": True}))
+        acts = order_actions([n for n in names if n])
         if not acts:
             raise DesignError("no input actions were found; give 'steps' [{action, prompt, done_when}].")
         steps_in = [{"action": a, "prompt": f"Press the {a.removeprefix('IA_')} key",
@@ -560,11 +610,17 @@ async def health(run: Run, store: Store, args: dict[str, Any]) -> dict[str, Any]
         "uncooked_references": await run("hf_find_uncooked_references", {"limit": 25, "hard_only": True}),
         "data_tables": await run("hf_audit_data_tables", {}),
     }
-    summary = {k: findings_of(v, 5) for k, v in sections.items()}
+    weight = {"error": 3, "critical": 3, "blocker": 3, "warning": 2, "warn": 2, "info": 0, "note": 0}
     actions = []
-    for k, (n, first) in summary.items():
-        if n:
-            actions.append({"area": k, "count": n, "first": first[:3]})
+    for k, v in sections.items():
+        n, first = findings_of(v, 200)
+        if not n:
+            continue
+        sev = [str(f.get("severity", "warning")).lower() if isinstance(f, dict) else "warning" for f in first]
+        score = max((weight.get(x, 1) for x in sev), default=1)
+        real = [f for f, x in zip(first, sev) if weight.get(x, 1) > 0]
+        actions.append({"area": k, "count": n, "worst": max(sev, key=lambda x: weight.get(x, 1)) if sev else "unknown",
+                        "first": (real or first)[:3], "_score": score})
     doc = store.load("design.json")
     drift = None
     if doc:
@@ -573,7 +629,8 @@ async def health(run: Run, store: Store, args: dict[str, Any]) -> dict[str, Any]
         missing = [f["name"] for f in doc.get("features") or [] if f.get("priority") == "must"
                    and not any(w in text for w in re.findall(r"[a-z]{4,}", f["name"].lower()))]
         drift = {"must_features_with_nothing_in_project": missing, "doc_findings": doc_findings(doc)}
-    out = {"actions": sorted(actions, key=lambda a: -a["count"]), "design_drift": drift,
+    actions.sort(key=lambda a: (-a.pop("_score"), -a["count"]))
+    out = {"actions": actions, "design_drift": drift,
            "ran": run.ran, "verdict": f"{sum(a['count'] for a in actions)} item(s) across {len(actions)} area(s)"}
     store.save({"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "actions": out["actions"], "design_drift": drift},
                "health", f"health-{time.strftime('%Y%m%d')}.json")
@@ -616,15 +673,16 @@ TOOLS: list[ToolDef] = [
                   "timeout_seconds": {"type": "number", "default": 120}})),
     ToolDef("hf_perf_budget", WRITE,
             "Is it fast enough? Profiles a play session (PIE) and compares it with budgets (frame, game, draw and "
-            "GPU ms, hitches, draw calls, triangles; defaults aim at 60 fps), then names the worst offenders from "
-            "the scene cost, texture and LOD audits with what to try. 'baseline' with save_baseline stores the "
+            "p95 frame, game, render and GPU ms, hitches per minute; defaults aim at 60 fps), starting and "
+            "stopping Play In Editor if needed ('map' profiles a standalone game instead), then names the worst "
+            "offenders from the scene cost, texture and LOD audits with what to try. 'baseline' with save_baseline stores the "
             "numbers; later calls with the same baseline report what changed.",
             _obj({"budget": {"type": "object", "description": "Overrides, e.g. {frame_ms: 33.3} for 30 fps."},
                   "seconds": {"type": "number", "default": 20}, "map": _S, "baseline": _S,
                   "save_baseline": {"type": "boolean", "default": False}, "large_texture": {"type": "integer", "default": 2048}})),
     ToolDef("hf_accessibility_pass", WRITE,
-            "Check the game against common accessibility needs (remappable controls, input conflicts, subtitles not "
-            "suppressed, voiced audio with subtitles) and list the checks only a person can make. Unless "
+            "Check the game against common accessibility needs (remappable controls in the Enhanced Input "
+            "mapping contexts, input conflicts, voiced audio with subtitles) and list the checks only a person can make. Unless "
             "scaffold_settings is false, also writes DT_AccessibilitySettings: subtitles, sizes, colour-blind "
             "mode, shake and bob scale, hold-to-toggle, aim assist, motion blur, FOV, flash reduction, with defaults.",
             _obj({"scaffold_settings": {"type": "boolean", "default": True}, "folder": _S})),

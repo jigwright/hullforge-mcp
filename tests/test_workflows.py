@@ -68,11 +68,25 @@ def test_ship_report_launches_only_when_packaged():
 
 
 def test_perf_budget_compares_measured_numbers(tmp_path):
-    ed = Editor({"hf_profile_run": {"finished": True, "stats": {"frame_ms_avg": 22.0, "game_ms_avg": 5.0, "hitch_count": 1}}})
-    out = run(w.call_tool("hf_perf_budget", {}, d.Store(tmp_path), ed))
+    state = {"playing": False}
+    def start(a):
+        state["playing"] = True
+        return {}
+    ed = Editor({"hf_get_pie_state": lambda a: dict(state), "hf_start_pie": start, "hf_profile_run": {"run_id": 1},
+                 "hf_get_profile_run": {"done": True, "result": {"ms": {"frame": {"avg": 22.0, "p95": 25.0},
+                                        "game": {"avg": 5.0}}, "hitches": {"per_minute": 1}}}})
+    out = run(w.call_tool("hf_perf_budget", {"seconds": 1}, d.Store(tmp_path), ed))
+    assert ("hf_stop_pie", {}) in ed.calls
     over = {o["budget"]: o for o in out["over_budget"]}
     assert "frame_ms" in over and over["frame_ms"]["measured"] == 22.0
-    assert {o["budget"] for o in out["within_budget"]} >= {"game_ms", "hitches"}
+    assert {o["budget"] for o in out["within_budget"]} >= {"game_ms", "hitches_per_minute"}
+
+
+def test_health_ranks_errors_above_info(tmp_path):
+    ed = Editor({"hf_audit_lods": {"findings": [{"severity": "info"}] * 13},
+                 "hf_audit_blueprints": {"findings": [{"severity": "warning", "detail": "empty tick"}]}})
+    out = run(w.call_tool("hf_health_report", {}, d.Store(tmp_path), ed))
+    assert [a["area"] for a in out["actions"]][:2] == ["blueprints", "lods"]
 
 
 def test_failed_steps_are_reported_not_fatal(tmp_path):
@@ -82,7 +96,7 @@ def test_failed_steps_are_reported_not_fatal(tmp_path):
 
 
 def test_tutorial_orders_actions_and_writes_table(tmp_path):
-    ed = Editor({"hf_describe_input_mappings": {"mappings": [{"action": "IA_Fire"}, {"action": "IA_Jump"}, {"action": "IA_Move"}]}})
+    ed = Editor({"hf_find_assets": {"assets": [{"name": "IA_Fire"}, {"name": "IA_Jump"}, {"name": "IA_Move"}]}})
     out = run(w.call_tool("hf_build_tutorial", {}, d.Store(tmp_path), ed))
     assert [r["Action"] for r in out["steps"]] == ["IA_Move", "IA_Jump", "IA_Fire"]
     assert "Tutorial.01" in ed.tables["/Game/Design/DT_Tutorial"]
@@ -121,7 +135,8 @@ def test_store_kit_sizes(tmp_path):
 
 
 def test_accessibility_scaffolds_settings(tmp_path):
-    ed = Editor({"hf_describe_input_mappings": {"mappings": [{"action": "IA_Jump"}]}})
+    ed = Editor({"hf_find_assets": {"assets": [{"name": "IMC_Default", "object_path": "/Game/IMC_Default.IMC_Default"}]},
+                 "hf_describe_player_mappable_config": {"mapping_count": 3, "player_mappable_count": 0}})
     out = run(w.call_tool("hf_accessibility_pass", {}, d.Store(tmp_path), ed))
     assert out["checks"][0]["status"] == "fail"
     assert "ColorblindMode" in ed.tables["/Game/Design/DT_AccessibilitySettings"]
